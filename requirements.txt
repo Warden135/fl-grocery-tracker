@@ -1,4 +1,5 @@
 flask>=3.0
 requests>=2.31
 beautifulsoup4>=4.12
-gunicorn>=22.0
+gunicorn>=22.0; sys_platform != "win32"
+waitress>=3.0; sys_platform == "win32"
