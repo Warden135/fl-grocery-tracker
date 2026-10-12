@@ -87,7 +87,7 @@ def _site_password():
     if auth and auth.password is not None and hmac.compare_digest(
             auth.password.encode(), expected.encode()):
         return None
-    return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="Shelf Scout"'})
+    return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="Anils Grocery"'})
 
 
 @app.before_request

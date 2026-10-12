@@ -1,4 +1,4 @@
-/* Shelf Scout. The one memorable thing is the yellow shelf tag that shows prices.
+/* Anil's Grocery. The one memorable thing is the yellow shelf tag that shows prices.
    Everything else stays quiet: plain rows, hairlines, one radius for controls. */
 
 :root {
@@ -325,3 +325,5 @@ h3.sec { font: 700 20px/1.2 var(--display); padding: 16px 20px 6px; margin: 0; }
 .rline .grow { flex: 1; min-width: 0; }
 .rline .money { max-width: 160px; }
 .sheet .pair .field { padding-bottom: 8px; }
+.hello { padding: 16px 20px 0; color: var(--muted); font-weight: 600; }
+.hello + .top { padding-top: 4px; }

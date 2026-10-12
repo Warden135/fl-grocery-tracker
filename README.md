@@ -1,4 +1,4 @@
-# Shelf Scout
+# Anil's Grocery
 
 A grocery price app for friends and family. Build a shopping list, and see which store
 within 5, 10 or 15 miles of your ZIP code charges the least. Shoppers report the prices

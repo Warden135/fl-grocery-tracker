@@ -153,7 +153,7 @@
   function authView() {
     const up = state.authMode === 'signup';
     return `<div class="auth">
-      <h1>Shelf Scout</h1>
+      <h1>Anil's Grocery</h1>
       ${tag({ label: 'Example', store: 'Cheapest eggs near you', price: 2.89, meta: ['Updated today'], print: state.printTag })}
       <p class="lead">Build a grocery list and see which store near you charges the least. Report prices you see and earn rewards.</p>
       <form data-form="auth" novalidate>
@@ -205,7 +205,7 @@
     const seg = b && b.items.length ? `<div class="seg tabs" role="group" aria-label="List view">
       <button aria-pressed="${state.ltab === 'items'}" data-action="ltab" data-t="items"><b>My items</b></button>
       <button aria-pressed="${state.ltab === 'compare'}" data-action="ltab" data-t="compare"><b>Compare stores</b></button></div>` : '';
-    return header('My list', locationChip()) + remindersCard() + `
+    return `<p class="hello">Hi, ${esc(state.user.name.split(' ')[0])}</p>` + header('My list', locationChip()) + remindersCard() + `
       <form class="add" data-form="add-item" autocomplete="off">
         <label class="sr" for="add-input">Add an item</label>
         <div class="add-wrap"><input id="add-input" name="q" placeholder="Add an item, like eggs or milk" enterkeyhint="done" data-typeahead="add"><button class="btn" type="submit">Add</button></div>
@@ -357,7 +357,7 @@
     let body;
     if (!d.offers.length) {
       body = `<div class="empty"><h2>No weekly ads or coupons loaded yet</h2>
-        <p>Winn-Dixie, Publix and Walmart don't offer a public feed of their weekly ads, so Shelf Scout doesn't show deals it can't verify. When a feed is connected, sales and coupons will appear here with their expiry dates and conditions, and anything that matches your list will be counted in your savings.</p></div>`;
+        <p>Winn-Dixie, Publix and Walmart don't offer a public feed of their weekly ads, so Anil's Grocery doesn't show deals it can't verify. When a feed is connected, sales and coupons will appear here with their expiry dates and conditions, and anything that matches your list will be counted in your savings.</p></div>`;
     } else {
       body = ['winndixie', 'publix', 'walmart'].map((k) => {
         const list = d.offers.filter((o) => o.chain === k);
@@ -445,12 +445,12 @@
       <ul class="rows">${['winndixie', 'publix', 'walmart'].map((k) => {
         const name = brandOf(k).name;
         return `<li class="row top"><div class="grow">${chainBadge(k)}
-          <div class="sub gap">${esc(PROGRAM_INFO[k])}. Shelf Scout can't connect to your ${esc(name)} account yet, so it can't see your points or apply coupons for you.</div>
+          <div class="sub gap">${esc(PROGRAM_INFO[k])}. Anil's Grocery can't connect to your ${esc(name)} account yet, so it can't see your points or apply coupons for you.</div>
           <label class="check-line"><input type="checkbox" data-program="${k}" ${mine.includes(k) ? 'checked' : ''}> I have a ${esc(name)} account</label>
           <div class="sub">What a connection would need: the sign-in details for that account. We would never ask for your password in this app, and nothing is collected today.</div></div></li>`;
       }).join('')}</ul>
       <h2>Rewards earned</h2>
-      <p class="lead">Shelf Scout never says you earned store rewards or used a coupon unless a confirmed purchase or a verified offer shows it. Today no store connection exists, so no store rewards are shown. The points below are Shelf Scout's own, for reporting prices.</p>`;
+      <p class="lead">Anil's Grocery never says you earned store rewards or used a coupon unless a confirmed purchase or a verified offer shows it. Today no store connection exists, so no store rewards are shown. The points below are Anil's Grocery's own, for reporting prices.</p>`;
   }
 
   function rewardsHub() {
@@ -532,7 +532,7 @@
         : `<p class="lead">No stores within ${u.radius_miles} miles yet. Add one under Rewards, Report a price.</p>`;
     const ios = /iphone|ipad/i.test(navigator.userAgent) && !navigator.standalone;
     const install = state.installEvent
-      ? '<div class="pad"><button class="btn quiet" data-action="install">Install Shelf Scout on this device</button></div>'
+      ? '<div class="pad"><button class="btn quiet" data-action="install">Install Anil\'s Grocery on this device</button></div>'
       : ios ? '<p class="lead">To install on iPhone, tap Share, then Add to Home Screen.</p>' : '';
     return header('Me') + `
       <div class="row"><div class="grow"><div class="name">${esc(u.name)}</div><div class="sub">${esc(u.email)}</div></div><button class="chip" data-action="open-location">${esc(u.city || u.zip)} ${esc(u.zip)}</button></div>
@@ -555,7 +555,7 @@
 
   // Primary navigation sits at the top: List, Deals, Rewards, Me.
   function navView() {
-    return `<header class="topbar"><div class="topbar-in"><span class="brandmark">Shelf Scout</span>
+    return `<header class="topbar"><div class="topbar-in"><span class="brandmark">Anil's Grocery</span>
       <nav class="nav" aria-label="Main"><ul>${TABS.map(([id, label]) => `<li><button data-action="tab" data-tab="${id}" ${state.tab === id ? 'aria-current="page"' : ''}>${icon(id)}<span>${label}</span></button></li>`).join('')}</ul></nav></div></header>`;
   }
 
@@ -570,7 +570,7 @@
     } else {
       const view = { list: listView, deals: dealsView, rewards: rewardsHub, me: meView }[state.tab];
       const title = TABS.find((t) => t[0] === state.tab)[2];
-      document.title = `${title} - Shelf Scout`;
+      document.title = `${title} - Anil's Grocery`;
       app.innerHTML = `${navView()}<div class="shell"><main id="main" tabindex="-1">${view()}</main></div>`;
     }
     if ($('.tag.print')) state.printTag = false;
@@ -749,7 +749,7 @@
 
   function receiptStart(msg = '') {
     setSheetBody(`${errBox(msg)}
-      <label class="field"><span>Take or choose a photo of the receipt</span><input id="receipt-file" type="file" accept="image/*" capture="environment"><small>The photo is sent to Anthropic's Claude to read the items, and isn't stored by Shelf Scout. Needs the server to have a key set.</small></label>
+      <label class="field"><span>Take or choose a photo of the receipt</span><input id="receipt-file" type="file" accept="image/*" capture="environment"><small>The photo is sent to Anthropic's Claude to read the items, and isn't stored by Anil's Grocery. Needs the server to have a key set.</small></label>
       <form data-form="receipt-text" novalidate>
         <label class="field"><span>Or paste the receipt text</span><textarea name="text" placeholder="MILK WHL GAL  3.49&#10;EGGS LG 12CT  2.99"></textarea><small>Works with e-receipts and store app receipts. Nothing is sent anywhere.</small></label>
         <button class="btn wide" type="submit">Read receipt</button></form>`);

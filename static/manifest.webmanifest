@@ -1,6 +1,6 @@
 {
-  "name": "Shelf Scout",
-  "short_name": "Shelf Scout",
+  "name": "Anil's Grocery",
+  "short_name": "Anil's",
   "description": "Build a grocery list and see which store near you charges the least.",
   "start_url": "/",
   "scope": "/",

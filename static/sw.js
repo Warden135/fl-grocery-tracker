@@ -1,6 +1,6 @@
 /* Service worker: makes the app installable and keeps the shell available offline.
    API calls are never cached, so prices and account data are always fresh. */
-const CACHE = 'shelf-scout-v3';
+const CACHE = 'anils-grocery-v4';
 const SHELL = ['/', '/static/app.css', '/static/app.js', '/static/icons/icon-192.png'];
 
 self.addEventListener('install', (event) => {
