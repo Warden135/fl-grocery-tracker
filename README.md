@@ -121,3 +121,12 @@ deploy/     systemd files for a Linux home server
 - Push or email notifications for price alerts
 - Unit prices (per ounce or pound) so different package sizes compare fairly
 - Wrap the web app with Capacitor if you want App Store and Google Play versions
+
+## Personal shopping assistant features (v3)
+
+- **Top navigation:** List, Deals, Rewards, Me. Reporting prices lives under Rewards.
+- **Stores:** Winn-Dixie, Publix and Walmart are compared side by side. Badges show each chain's name in its brand color. The app does not ship the chains' logos; to use official ones you are licensed to use, drop `winndixie.svg`, `publix.svg` and `walmart.svg` (or `.png`) into `static/brands/`.
+- **Removing items:** "Did you buy this item?" Yes records the purchase (optionally store and price paid), No just removes it. Both can be undone; purchase history is kept.
+- **Restock reminders:** learned from purchase history (median gap between purchases), always labeled as estimates. Set your own interval and quantity, snooze, dismiss, mark restocked, or turn reminders off.
+- **Comparison:** per item and per list, with lowest cost, fewest stores, or best value (extra stops must beat your minimum saving after estimated driving).
+- **Honest data:** every price is labeled Verified, Unconfirmed or Sample, and missing data is shown as missing. Deals and coupons appear only if real offers are loaded; none are included. Offers are loaded with `POST /api/admin/offers` (needs `ADMIN_TOKEN`) or by adding a provider in `app/providers.py`. No store feed is connected yet.

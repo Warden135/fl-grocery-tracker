@@ -5,7 +5,7 @@ DB_PATH = os.environ.get(
     "GROCERY_DB",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "grocery.db"),
 )
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _stores_ddl(name="stores"):
@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     category TEXT,
-    unit TEXT
+    unit TEXT,
+    brand TEXT,
+    package_size TEXT,
+    image_url TEXT
 );
 -- A listing = "this product at this store". url/selector are used by the scraper.
 CREATE TABLE IF NOT EXISTS listings (
@@ -144,6 +147,70 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 """
 
+V3_SCHEMA = """
+-- Everything a shopper bought. Kept when an item leaves the active list.
+CREATE TABLE IF NOT EXISTS purchases (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    qty INTEGER NOT NULL DEFAULT 1,
+    bought_at TEXT NOT NULL DEFAULT (datetime('now')),
+    chain TEXT,            -- store chain the shopper says they used (optional)
+    paid REAL,             -- price per unit the shopper says they paid (optional)
+    ref_high REAL          -- highest price per unit among the 3 stores at the time (if known)
+);
+CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id, product_id, bought_at);
+-- Per-shopper settings for one product.
+CREATE TABLE IF NOT EXISTS item_prefs (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    interval_days INTEGER,          -- shopper's own restock interval; NULL = learn from history
+    usual_qty INTEGER,              -- NULL = learn from history
+    reminders INTEGER NOT NULL DEFAULT 1,
+    excluded INTEGER NOT NULL DEFAULT 0,
+    favorite INTEGER NOT NULL DEFAULT 0,
+    snoozed_until TEXT,
+    dismissed_after TEXT,           -- reminder hidden until a purchase newer than this
+    PRIMARY KEY (user_id, product_id)
+);
+CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    preferred_chains TEXT NOT NULL DEFAULT '[]',   -- JSON list of chain keys; empty = all three
+    programs TEXT NOT NULL DEFAULT '[]',           -- chains where the shopper says they have an account
+    budget REAL,
+    household INTEGER,
+    strategy TEXT NOT NULL DEFAULT 'value',        -- lowest | fewest | value
+    min_savings REAL NOT NULL DEFAULT 2.0,
+    cost_per_mile REAL NOT NULL DEFAULT 0.30,
+    reminders_on INTEGER NOT NULL DEFAULT 1,
+    verified_only INTEGER NOT NULL DEFAULT 0,
+    fav_brands TEXT NOT NULL DEFAULT '',
+    avoid_terms TEXT NOT NULL DEFAULT '',
+    diet_note TEXT NOT NULL DEFAULT ''
+);
+-- Weekly ads, digital coupons and loyalty offers. Nothing is ever generated:
+-- rows only come from an imported feed (see app/providers.py).
+CREATE TABLE IF NOT EXISTS offers (
+    id INTEGER PRIMARY KEY,
+    chain TEXT NOT NULL,
+    product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,                 -- sale | coupon | loyalty
+    title TEXT NOT NULL,
+    sale_price REAL,                    -- price per unit while the offer applies
+    amount_off REAL,                    -- or dollars off per unit
+    min_spend REAL,
+    max_qty INTEGER,                    -- per-customer limit, if the offer has one
+    requires_account INTEGER NOT NULL DEFAULT 0,
+    conditions TEXT NOT NULL DEFAULT '',
+    starts_on TEXT,
+    expires_on TEXT,
+    source TEXT NOT NULL,               -- where the feed got it, e.g. "Publix weekly ad"
+    source_url TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_offers_chain ON offers(chain, expires_on);
+"""
+
 REWARDS = [
     ("scout_badge", "Scout badge", "Shows a Scout badge next to your name on reviews and price reports.", 50, "badge"),
     ("citrus_theme", "Citrus theme", "Switches the app to a warm citrus accent color.", 120, "theme"),
@@ -203,11 +270,16 @@ def init_db():
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stores'").fetchone()
     finally:
         conn.close()
-    if has_stores and version < SCHEMA_VERSION:
+    if has_stores and version < 2:
         _migrate_v1()
     with get_conn() as c:
         c.executescript(CORE_SCHEMA)
+        have = {r[1] for r in c.execute("PRAGMA table_info(products)")}
+        for col in ("brand", "package_size", "image_url"):
+            if col not in have:
+                c.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
         c.executescript(EXTRA_SCHEMA)
+        c.executescript(V3_SCHEMA)
         for key, name, desc, cost, kind in REWARDS:
             c.execute("INSERT OR IGNORE INTO rewards (key, name, description, cost, kind) "
                       "VALUES (?, ?, ?, ?, ?)", (key, name, desc, cost, kind))

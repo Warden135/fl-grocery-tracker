@@ -1,4 +1,5 @@
 import hmac
+import json
 import os
 import re
 import secrets
@@ -11,8 +12,11 @@ from functools import wraps
 from flask import Flask, Response, g, jsonify, request, send_from_directory, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from . import geo, scoring
+from datetime import datetime, timedelta
+
+from . import brands, geo, providers, replenish, scoring
 from .basket import build_basket
+from .compare import STRATEGIES, build_compare
 from .db import DB_PATH, LATEST_PRICES_SQL, get_conn, init_db
 from .scraper import scrape_all
 
@@ -91,7 +95,7 @@ def _csrf_guard():
     # Browsers can't add custom headers to cross-site form posts, and the session
     # cookie is SameSite=Lax, so requiring this header blocks cross-site writes.
     if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.path.startswith("/api/") \
-            and request.path != "/api/admin/scrape":
+            and request.path not in ("/api/admin/scrape", "/api/admin/offers"):
         if request.headers.get("X-App") != "1":
             return err("Request blocked.", 403)
     return None
@@ -160,9 +164,27 @@ def user_json(uid):
         earned = c.execute("SELECT COALESCE(SUM(delta), 0) FROM points_ledger "
                            "WHERE user_id = ? AND delta > 0", (uid,)).fetchone()[0]
         perks = sorted(perk_map(c, [uid]).get(uid, set()))
+        prefs = get_prefs(c, uid)
     return {"id": u["id"], "name": u["name"], "email": u["email"], "zip": u["zip"],
             "city": u["city"], "radius_miles": u["radius_miles"], "points": u["points"],
-            "earned": earned, "level": scoring.level_for(earned), "perks": perks}
+            "earned": earned, "level": scoring.level_for(earned), "perks": perks, "prefs": prefs}
+
+
+PREF_LISTS = ("preferred_chains", "programs")
+
+
+def get_prefs(conn, uid):
+    conn.execute("INSERT OR IGNORE INTO user_prefs (user_id) VALUES (?)", (uid,))
+    r = dict(conn.execute("SELECT * FROM user_prefs WHERE user_id = ?", (uid,)).fetchone())
+    r.pop("user_id")
+    for k in PREF_LISTS:
+        try:
+            r[k] = [x for x in json.loads(r[k]) if x in brands.BY_KEY]
+        except ValueError:
+            r[k] = []
+    r["reminders_on"] = bool(r["reminders_on"])
+    r["verified_only"] = bool(r["verified_only"])
+    return r
 
 
 def resolve_zip(zip5):
@@ -286,8 +308,8 @@ def logout():
 @app.get("/api/me")
 def me():
     if not g.user:
-        return jsonify(user=None)
-    return jsonify(user=user_json(g.user["id"]))
+        return jsonify(user=None, brands=brands.brands_json())
+    return jsonify(user=user_json(g.user["id"]), brands=brands.brands_json())
 
 
 @app.patch("/api/me")
@@ -323,8 +345,16 @@ def products():
     q = "%" + (request.args.get("q") or "").strip() + "%"
     with get_conn() as c:
         data = rows(c.execute(
-            "SELECT id, name, category, unit FROM products WHERE name LIKE ? "
-            "ORDER BY name LIMIT 60", (q,)))
+            "SELECT p.id, p.name, p.category, p.unit, p.brand, p.package_size, p.image_url, "
+            "COALESCE(ip.excluded, 0) AS excluded, COALESCE(ip.favorite, 0) AS favorite "
+            "FROM products p LEFT JOIN item_prefs ip ON ip.product_id = p.id AND ip.user_id = ? "
+            "WHERE p.name LIKE ? ORDER BY p.name LIMIT 60", (g.user["id"], q)))
+        prefs = get_prefs(c, g.user["id"])
+    avoid = [t.strip().lower() for t in prefs["avoid_terms"].split(",") if t.strip()]
+    favs = [t.strip().lower() for t in prefs["fav_brands"].split(",") if t.strip()]
+    data = [d for d in data if not d["excluded"] and not any(
+        t in (d["name"] + " " + (d["brand"] or "")).lower() for t in avoid)]
+    data.sort(key=lambda d: (not d["favorite"], not any(f in (d["brand"] or "").lower() for f in favs), d["name"]))
     return jsonify(data)
 
 
@@ -341,8 +371,10 @@ def add_product():
             return jsonify(dict(existing)), 200
         if too_many(("product", g.user["id"]), 10, 86400):
             return err("You've added the maximum number of new items for today.", 429)
-        c.execute("INSERT INTO products (name, category, unit) VALUES (?, ?, ?)",
-                  (name, (b.get("category") or None), (b.get("unit") or None)))
+        brand = re.sub(r"\s+", " ", str(b.get("brand") or "").strip())[:40] or None
+        size = re.sub(r"\s+", " ", str(b.get("package_size") or "").strip())[:40] or None
+        c.execute("INSERT INTO products (name, category, unit, brand, package_size) VALUES (?, ?, ?, ?, ?)",
+                  (name, (b.get("category") or None), (b.get("unit") or None), brand, size))
         row = c.execute("SELECT * FROM products WHERE name = ?", (name,)).fetchone()
     return jsonify(dict(row)), 201
 
@@ -388,7 +420,8 @@ def history(product_id):
 def list_get():
     with get_conn() as c:
         return jsonify(rows(c.execute(
-            "SELECT li.id, li.qty, li.checked, p.id AS product_id, p.name, p.unit "
+            "SELECT li.id, li.qty, li.checked, p.id AS product_id, p.name, p.unit, "
+            "p.brand, p.package_size, p.image_url "
             "FROM list_items li JOIN products p ON p.id = li.product_id "
             "WHERE li.user_id = ? ORDER BY li.checked, p.name", (g.user["id"],))))
 
@@ -449,7 +482,8 @@ def basket():
     radius = radius_arg()
     with get_conn() as c:
         items = rows(c.execute(
-            "SELECT li.id AS item_id, li.qty, li.checked, p.id AS product_id, p.name, p.unit "
+            "SELECT li.id AS item_id, li.qty, li.checked, p.id AS product_id, p.name, p.unit, "
+            "p.brand, p.package_size, p.image_url "
             "FROM list_items li JOIN products p ON p.id = li.product_id "
             "WHERE li.user_id = ? ORDER BY li.checked, p.name", (g.user["id"],)))
         active = [i for i in items if not i["checked"]]
@@ -792,6 +826,362 @@ def redeem(key):
                   (uid, r["id"], r["cost"]))
         scoring.award(c, uid, -r["cost"], "redeem", r["id"])
     return jsonify(ok=True, user=user_json(uid), message=f"{r['name']} unlocked.")
+
+
+# ---------- preferences ----------
+
+def _num(v, lo, hi, name, integer=False):
+    if v in (None, ""):
+        return None
+    try:
+        n = int(v) if integer else round(float(v), 2)
+    except (TypeError, ValueError):
+        raise ValueError(f"Enter a number for {name}.")
+    if not lo <= n <= hi:
+        raise ValueError(f"{name[0].upper() + name[1:]} must be between {lo} and {hi}.")
+    return n
+
+
+@app.patch("/api/prefs")
+@login_required
+def update_prefs():
+    b = request.get_json(silent=True) or {}
+    sets, vals = [], []
+
+    def put(col, val):
+        sets.append(f"{col} = ?")
+        vals.append(val)
+    try:
+        for k in PREF_LISTS:
+            if k in b:
+                if not isinstance(b[k], list) or any(x not in brands.BY_KEY for x in b[k]):
+                    raise ValueError("Choose from Winn-Dixie, Publix and Walmart.")
+                put(k, json.dumps(sorted(set(b[k]))))
+        if "budget" in b:
+            put("budget", _num(b["budget"], 1, 100000, "budget"))
+        if "household" in b:
+            put("household", _num(b["household"], 1, 20, "household size", integer=True))
+        if "min_savings" in b:
+            put("min_savings", _num(b["min_savings"], 0, 100, "minimum savings") or 0)
+        if "cost_per_mile" in b:
+            put("cost_per_mile", _num(b["cost_per_mile"], 0, 5, "cost per mile") or 0)
+        if "strategy" in b:
+            if b["strategy"] not in STRATEGIES:
+                raise ValueError("Choose lowest cost, fewest stores or best value.")
+            put("strategy", b["strategy"])
+        for k in ("reminders_on", "verified_only"):
+            if k in b:
+                put(k, 1 if b[k] else 0)
+        for k, n in (("fav_brands", 200), ("avoid_terms", 200), ("diet_note", 200)):
+            if k in b:
+                put(k, re.sub(r"\s+", " ", str(b[k] or "").strip())[:n])
+    except ValueError as e:
+        return err(str(e))
+    if not sets:
+        return err("Nothing to update.")
+    with get_conn() as c:
+        get_prefs(c, g.user["id"])
+        c.execute(f"UPDATE user_prefs SET {', '.join(sets)} WHERE user_id = ?", vals + [g.user["id"]])
+    return jsonify(user=user_json(g.user["id"]))
+
+
+# ---------- compare across Winn-Dixie, Publix and Walmart ----------
+
+def _list_items(c, uid):
+    return rows(c.execute(
+        "SELECT li.id AS item_id, li.qty, li.checked, p.id AS product_id, p.name, p.unit, "
+        "p.brand, p.package_size, p.image_url FROM list_items li JOIN products p ON p.id = li.product_id "
+        "WHERE li.user_id = ? ORDER BY li.checked, p.name", (uid,)))
+
+
+@app.get("/api/compare")
+@login_required
+def compare_route():
+    radius = radius_arg()
+    with get_conn() as c:
+        prefs = get_prefs(c, g.user["id"])
+        items = _list_items(c, g.user["id"])
+        price_rows = rows(c.execute(
+            "SELECT * FROM (" + LATEST_PRICES_SQL + ") WHERE product_id IN "
+            "(SELECT product_id FROM list_items WHERE user_id = ?)", (g.user["id"],)))
+        offers = providers.active_offers(c)
+    out = build_compare(items, price_rows, offers, center(), radius, prefs)
+    out["providers"] = [p for p in providers.status() if p.get("chain")]
+    return jsonify(out)
+
+
+# ---------- deals ----------
+
+@app.get("/api/deals")
+@login_required
+def deals():
+    radius = radius_arg()
+    with get_conn() as c:
+        prefs = get_prefs(c, g.user["id"])
+        items = {i["product_id"]: i for i in _list_items(c, g.user["id"]) if not i["checked"]}
+        offers = providers.active_offers(c)
+        price_rows = rows(c.execute("SELECT * FROM (" + LATEST_PRICES_SQL + ")"))
+    near = nearby(price_rows, radius)
+    shelf = {}   # (chain, product) -> cheapest nearby price at that chain
+    for r in near:
+        k = brands.chain_key(r["chain"])
+        if k and r["store_source"] != "demo":
+            key = (k, r["product_id"])
+            if key not in shelf or r["price"] < shelf[key]:
+                shelf[key] = r["price"]
+    out, best = [], {}
+    for o in offers:
+        item = items.get(o["product_id"]) if o["product_id"] else None
+        v = {k: o[k] for k in ("id", "chain", "kind", "title", "product", "product_id", "sale_price", "amount_off",
+                               "min_spend", "max_qty", "requires_account", "conditions", "starts_on",
+                               "expires_on", "source", "source_url")}
+        v["chain_name"] = brands.BY_KEY.get(o["chain"], {}).get("name", o["chain"])
+        v["on_list"] = bool(item)
+        v["account_ok"] = (not o["requires_account"]) or o["chain"] in prefs["programs"]
+        v["saves"] = None
+        if item and (o["chain"], o["product_id"]) in shelf:
+            price = shelf[(o["chain"], o["product_id"])]
+            unit = o["sale_price"] if o["sale_price"] is not None else price - (o["amount_off"] or 0)
+            if unit < price:
+                n = min(item["qty"], o["max_qty"]) if o["max_qty"] else item["qty"]
+                v["saves"] = round((price - unit) * n, 2)
+                if v["account_ok"] and not o["min_spend"]:
+                    key = (o["chain"], o["product_id"])
+                    best[key] = max(best.get(key, 0), v["saves"])
+        out.append(v)
+    by_chain = defaultdict(float)
+    for (chain, _), amount in best.items():
+        by_chain[chain] += amount
+    return jsonify(offers=out, providers=providers.status(), programs=prefs["programs"],
+                   list_savings={k: round(v, 2) for k, v in by_chain.items()},
+                   list_size=len(items))
+
+
+@app.post("/api/admin/offers")
+def import_offers_route():
+    """Load offers from a real feed. Needs ADMIN_TOKEN and a matching X-Admin-Token header."""
+    token = os.environ.get("ADMIN_TOKEN")
+    sent = request.headers.get("X-Admin-Token", "")
+    if not token or not hmac.compare_digest(sent.encode(), token.encode()):
+        return err("Not allowed.", 403)
+    b = request.get_json(silent=True) or {}
+    if not isinstance(b.get("offers"), list):
+        return err("Send {\"offers\": [...]}.")
+    saved, errors = providers.import_offers(b["offers"], b.get("replace_source"))
+    return jsonify(saved=saved, errors=errors)
+
+
+# ---------- removing items, purchase history ----------
+
+def _ref_high(c, product_id):
+    """Highest of the three chains' lowest real (non-sample) prices near the shopper, or None."""
+    data = rows(c.execute("SELECT * FROM (" + LATEST_PRICES_SQL + ") WHERE product_id = ?", (product_id,)))
+    best = {}
+    for r in nearby(data, g.user["radius_miles"]):
+        k = brands.chain_key(r["chain"])
+        if k and r["store_source"] != "demo":
+            best[k] = min(best.get(k, 1e9), r["price"])
+    return max(best.values()) if len(best) >= 2 else None
+
+
+def _item_pref(c, uid, pid):
+    c.execute("INSERT OR IGNORE INTO item_prefs (user_id, product_id) VALUES (?, ?)", (uid, pid))
+    return dict(c.execute("SELECT * FROM item_prefs WHERE user_id = ? AND product_id = ?", (uid, pid)).fetchone())
+
+
+def _record_purchase(c, uid, pid, qty, chain=None, paid=None):
+    cur = c.execute("INSERT INTO purchases (user_id, product_id, qty, chain, paid, ref_high) VALUES (?, ?, ?, ?, ?, ?)",
+                    (uid, pid, qty, chain, paid, _ref_high(c, pid)))
+    c.execute("UPDATE item_prefs SET snoozed_until = NULL WHERE user_id = ? AND product_id = ?", (uid, pid))
+    return cur.lastrowid
+
+
+@app.post("/api/list/<int:item_id>/remove")
+@login_required
+def list_remove(item_id):
+    """Take an item off the active list. bought=true also records the purchase."""
+    b = request.get_json(silent=True) or {}
+    if not isinstance(b.get("bought"), bool):
+        return err("Say whether you bought this item.")
+    chain, paid = b.get("chain") or None, None
+    if chain and chain not in brands.BY_KEY:
+        return err("Choose Winn-Dixie, Publix or Walmart.")
+    try:
+        paid = _num(b.get("paid"), 0.01, 999, "price paid")
+    except ValueError as e:
+        return err(str(e))
+    uid = g.user["id"]
+    with get_conn() as c:
+        it = c.execute("SELECT li.*, p.name FROM list_items li JOIN products p ON p.id = li.product_id "
+                       "WHERE li.id = ? AND li.user_id = ?", (item_id, uid)).fetchone()
+        if not it:
+            return err("We couldn't find that list item.", 404)
+        pid = None
+        if b["bought"]:
+            _item_pref(c, uid, it["product_id"])
+            pid = _record_purchase(c, uid, it["product_id"], it["qty"], chain, paid)
+        c.execute("DELETE FROM list_items WHERE id = ? AND user_id = ?", (item_id, uid))
+    return jsonify(ok=True, purchase_id=pid, product_id=it["product_id"], qty=it["qty"], name=it["name"])
+
+
+@app.post("/api/purchases/<int:purchase_id>/undo")
+@login_required
+def purchase_undo(purchase_id):
+    uid = g.user["id"]
+    with get_conn() as c:
+        p = c.execute("SELECT * FROM purchases WHERE id = ? AND user_id = ?", (purchase_id, uid)).fetchone()
+        if not p:
+            return err("We couldn't find that purchase.", 404)
+        c.execute("DELETE FROM purchases WHERE id = ?", (purchase_id,))
+        if (request.get_json(silent=True) or {}).get("restore", True):   # put it back on the list
+            c.execute("INSERT INTO list_items (user_id, product_id, qty) VALUES (?, ?, ?) "
+                      "ON CONFLICT(user_id, product_id) DO NOTHING", (uid, p["product_id"], p["qty"]))
+    return jsonify(ok=True)
+
+
+@app.delete("/api/purchases/<int:purchase_id>")
+@login_required
+def purchase_delete(purchase_id):
+    with get_conn() as c:
+        c.execute("DELETE FROM purchases WHERE id = ? AND user_id = ?", (purchase_id, g.user["id"]))
+    return jsonify(ok=True)
+
+
+@app.get("/api/purchases")
+@login_required
+def purchases_get():
+    uid = g.user["id"]
+    with get_conn() as c:
+        hist = rows(c.execute(
+            "SELECT pu.id, pu.product_id, p.name, pu.qty, pu.bought_at, pu.chain, pu.paid, pu.ref_high "
+            "FROM purchases pu JOIN products p ON p.id = pu.product_id WHERE pu.user_id = ? "
+            "ORDER BY pu.bought_at DESC, pu.id DESC LIMIT 60", (uid,)))
+        total = c.execute("SELECT COUNT(*) FROM purchases WHERE user_id = ?", (uid,)).fetchone()[0]
+        sv = c.execute(
+            "SELECT COALESCE(SUM((ref_high - paid) * qty), 0), COUNT(*) FROM purchases "
+            "WHERE user_id = ? AND paid IS NOT NULL AND ref_high IS NOT NULL AND ref_high > paid", (uid,)).fetchone()
+    for h in hist:
+        h["chain_name"] = brands.BY_KEY.get(h["chain"], {}).get("name")
+    return jsonify(purchases=hist, total=total, est_savings=round(sv[0], 2), savings_count=sv[1])
+
+
+# ---------- usage and restock reminders ----------
+
+def _estimates(c, uid, today=None):
+    prefs = {r["product_id"]: dict(r) for r in c.execute("SELECT * FROM item_prefs WHERE user_id = ?", (uid,))}
+    names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM products")}
+    hist = defaultdict(list)
+    for r in c.execute("SELECT product_id, bought_at, qty FROM purchases WHERE user_id = ? "
+                       "ORDER BY bought_at, id", (uid,)):
+        hist[r["product_id"]].append(dict(r))
+    on_list = {r["product_id"] for r in c.execute("SELECT product_id FROM list_items WHERE user_id = ?", (uid,))}
+    out = []
+    for pid in set(hist) | {p for p, v in prefs.items() if v.get("interval_days")}:
+        pref = prefs.get(pid, {})
+        est = replenish.estimate(hist.get(pid, []), pref, today)
+        out.append({"product_id": pid, "name": names.get(pid, "Item"), "estimate": est,
+                    "state": replenish.reminder_state(est, pref) if est else "later",
+                    "reminders": bool(pref.get("reminders", 1)), "excluded": bool(pref.get("excluded")),
+                    "on_list": pid in on_list, "purchases": len(hist.get(pid, []))})
+    out.sort(key=lambda r: (r["estimate"] is None, r["estimate"]["days_left"] if r["estimate"] else 0, r["name"]))
+    return out, prefs, names
+
+
+@app.get("/api/reminders")
+@login_required
+def reminders_get():
+    uid = g.user["id"]
+    with get_conn() as c:
+        prefs_row = get_prefs(c, uid)
+        tracked, prefs, names = _estimates(c, uid)
+    tracked = [t for t in tracked if not t["excluded"]]
+    due = [t for t in tracked if t["state"] == "due" and t["reminders"] and not t["on_list"]]
+    favorites = [{"product_id": p, "name": names.get(p, "Item")} for p, v in prefs.items() if v.get("favorite")]
+    excluded = [{"product_id": p, "name": names.get(p, "Item")} for p, v in prefs.items() if v.get("excluded")]
+    return jsonify(enabled=prefs_row["reminders_on"], due=due if prefs_row["reminders_on"] else [],
+                   tracked=tracked, favorites=favorites, excluded=excluded)
+
+
+@app.post("/api/reminders/<int:product_id>")
+@login_required
+def reminder_action(product_id):
+    b = request.get_json(silent=True) or {}
+    action, uid = b.get("action"), g.user["id"]
+    with get_conn() as c:
+        if not c.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone():
+            return err("We couldn't find that item.", 404)
+        _item_pref(c, uid, product_id)
+        tracked, prefs, _ = _estimates(c, uid)
+        cur = next((t for t in tracked if t["product_id"] == product_id), None)
+        qty = (cur and cur["estimate"] and cur["estimate"]["usual_qty"]) or 1
+        if action == "snooze":
+            try:
+                days = _num(b.get("days", 3), 1, 30, "snooze days", integer=True)
+            except ValueError as e:
+                return err(str(e))
+            until = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+            c.execute("UPDATE item_prefs SET snoozed_until = ? WHERE user_id = ? AND product_id = ?",
+                      (until, uid, product_id))
+        elif action == "dismiss":
+            last = cur["estimate"]["last_bought"] if cur and cur["estimate"] else datetime.utcnow().strftime("%Y-%m-%d")
+            c.execute("UPDATE item_prefs SET dismissed_after = ? WHERE user_id = ? AND product_id = ?",
+                      (last, uid, product_id))
+        elif action == "complete":
+            pid = _record_purchase(c, uid, product_id, qty)
+            return jsonify(ok=True, purchase_id=pid)
+        elif action == "add":
+            c.execute("INSERT INTO list_items (user_id, product_id, qty) VALUES (?, ?, ?) "
+                      "ON CONFLICT(user_id, product_id) DO UPDATE SET checked = 0", (uid, product_id, qty))
+        else:
+            return err("Choose snooze, dismiss, complete or add.")
+    return jsonify(ok=True)
+
+
+@app.get("/api/products/<int:product_id>/usage")
+@login_required
+def product_usage(product_id):
+    uid = g.user["id"]
+    with get_conn() as c:
+        p = c.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+        if not p:
+            return err("We couldn't find that item.", 404)
+        pref = _item_pref(c, uid, product_id)
+        hist = rows(c.execute("SELECT id, bought_at, qty FROM purchases WHERE user_id = ? AND product_id = ? "
+                              "ORDER BY bought_at, id", (uid, product_id)))
+    est = replenish.estimate(hist, pref)
+    pref["reminders"], pref["excluded"], pref["favorite"] = (bool(pref[k]) for k in ("reminders", "excluded", "favorite"))
+    return jsonify(prefs=pref, estimate=est, purchases=hist[-5:][::-1], count=len(hist))
+
+
+@app.patch("/api/products/<int:product_id>/prefs")
+@login_required
+def product_prefs(product_id):
+    b = request.get_json(silent=True) or {}
+    uid, sets, vals = g.user["id"], [], []
+    try:
+        if "interval_days" in b:
+            sets.append("interval_days = ?")
+            vals.append(_num(b["interval_days"], 1, 365, "restock interval", integer=True))
+        if "usual_qty" in b:
+            sets.append("usual_qty = ?")
+            vals.append(_num(b["usual_qty"], 1, 99, "quantity", integer=True))
+    except ValueError as e:
+        return err(str(e))
+    for k in ("reminders", "excluded", "favorite"):
+        if k in b:
+            sets.append(f"{k} = ?")
+            vals.append(1 if b[k] else 0)
+    if not sets:
+        return err("Nothing to update.")
+    with get_conn() as c:
+        if not c.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone():
+            return err("We couldn't find that item.", 404)
+        _item_pref(c, uid, product_id)
+        c.execute(f"UPDATE item_prefs SET {', '.join(sets)} WHERE user_id = ? AND product_id = ?",
+                  vals + [uid, product_id])
+        if b.get("excluded"):   # an excluded product leaves the active list too
+            c.execute("DELETE FROM list_items WHERE user_id = ? AND product_id = ?", (uid, product_id))
+    return jsonify(ok=True)
 
 
 # ---------- feedback and admin ----------
