@@ -210,7 +210,7 @@
         <label class="sr" for="add-input">Add an item</label>
         <div class="add-wrap"><input id="add-input" name="q" placeholder="Add an item, like eggs or milk" enterkeyhint="done" data-typeahead="add"><button class="btn" type="submit">Add</button></div>
         <ul id="sugg-add" class="sugg" hidden></ul>
-      </form>` + (favs.length ? `<div class="favs" role="group" aria-label="Favorites">${favs.map((f) => `<button class="chip" data-action="fav-add" data-pid="${f.product_id}">+ ${esc(f.name)}</button>`).join('')}</div>` : '') + seg + body;
+      </form>` + `<div class="favs"><button class="chip" data-action="receipt">Scan a receipt</button>${favs.map((f) => `<button class="chip" data-action="fav-add" data-pid="${f.product_id}">+ ${esc(f.name)}</button>`).join('')}</div>` + seg + body;
   }
 
   function listFootnote(c) {
@@ -373,7 +373,8 @@
     const stores = state.nearStores;
     const opts = (stores || []).map((s) => `<option value="${s.id}" ${String(s.id) === String(r.storeId) ? 'selected' : ''}>${esc(s.name)} (${s.distance} mi)</option>`).join('');
     const form = `
-      <p class="lead">Saw a price in the store? Add it and earn 5 points.</p>
+      <div class="pad"><button class="btn wide quiet" data-action="receipt">Scan a receipt: many prices at once</button></div>
+      <p class="lead tight">Or add one price you saw. You earn 5 points per price.</p>
       <form data-form="report" autocomplete="off" novalidate>
         ${errBox(r.error)}
         <label class="field"><span>Store</span>
@@ -709,19 +710,90 @@
   function openRemove(itemId) {
     const it = state.basket && state.basket.items.find((i) => i.item_id === itemId);
     if (!it) return;
+    const last = safeStore.get('lastChain') || '';
     openSheet('Did you buy this item?', `
       <p class="name">${esc(it.name)}${it.qty > 1 ? ` <span class="qty">× ${it.qty}</span>` : ''}</p>
+      <p class="sub gap">If you bought it, add where and what you paid. That shares the price with other shoppers and earns points.</p>
+      <div class="pair">
+        <label class="field"><span>Store</span><select id="rm-chain"><option value="">Not sure</option>${['winndixie', 'publix', 'walmart'].map((k) => `<option value="${k}" ${k === last ? 'selected' : ''}>${esc(brandOf(k).name)}</option>`).join('')}</select></label>
+        <label class="field"><span>Price each</span><span class="money"><b>$</b><input id="rm-paid" inputmode="decimal" placeholder="0.00"></span></label>
+      </div>
+      <div id="rm-err"></div>
       <div class="stack">
         <button class="btn wide" data-action="remove-yes" data-id="${itemId}">Yes, I bought it</button>
         <button class="btn wide quiet" data-action="remove-no" data-id="${itemId}">No, remove it</button>
       </div>
-      <details class="more"><summary>Add details if you bought it (optional)</summary>
-        <label class="field"><span>Where did you buy it?</span><select id="rm-chain"><option value="">Not sure or somewhere else</option>${['winndixie', 'publix', 'walmart'].map((k) => `<option value="${k}">${esc(brandOf(k).name)}</option>`).join('')}</select></label>
-        <label class="field"><span>Price you paid for each one</span><span class="money"><b>$</b><input id="rm-paid" inputmode="decimal" placeholder="0.00"></span></label>
-        <div id="rm-err"></div>
-      </details>
-      <p class="sub gap">Yes saves it to your purchase history, which is how we learn when you will need it again. No takes it off your list without recording anything. You can undo either one.</p>`);
+      <p class="sub">Yes saves it to your purchase history, which is how we learn when you will need it again. No takes it off your list without recording anything. You can undo either one.</p>`);
   }
+
+  // ---------- receipts ----------
+  function fileToJpeg(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onerror = () => reject(new Error("We couldn't read that file."));
+      fr.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error("That file isn't a photo we can open."));
+        img.onload = () => {
+          const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+          const cv = document.createElement('canvas');
+          cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+          cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+          resolve(cv.toDataURL('image/jpeg', 0.82).split(',')[1]);
+        };
+        img.src = fr.result;
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+
+  function receiptStart(msg = '') {
+    setSheetBody(`${errBox(msg)}
+      <label class="field"><span>Take or choose a photo of the receipt</span><input id="receipt-file" type="file" accept="image/*" capture="environment"><small>The photo is sent to Anthropic's Claude to read the items, and isn't stored by Shelf Scout. Needs the server to have a key set.</small></label>
+      <form data-form="receipt-text" novalidate>
+        <label class="field"><span>Or paste the receipt text</span><textarea name="text" placeholder="MILK WHL GAL  3.49&#10;EGGS LG 12CT  2.99"></textarea><small>Works with e-receipts and store app receipts. Nothing is sent anywhere.</small></label>
+        <button class="btn wide" type="submit">Read receipt</button></form>`);
+  }
+
+  async function openReceipt() {
+    openSheet('Scan a receipt', loading());
+    try { if (!state.nearStores) state.nearStores = (await api('GET', '/api/stores/nearby')).stores; } catch (e) { toast(e.message); }
+    receiptStart();
+  }
+
+  async function readReceipt(payload) {
+    setSheetBody(loading('Reading your receipt…'));
+    try {
+      const d = await api('POST', '/api/receipts/read', payload);
+      if (!d.lines.length) { receiptStart("We couldn't find any items with prices. Try a clearer photo or paste the text."); return; }
+      receiptReview(d);
+    } catch (e) { receiptStart(e.message); }
+  }
+
+  function receiptReview(d) {
+    const real = (state.nearStores || []).filter((s) => !s.sample);
+    const lastStore = safeStore.get('lastStore');
+    const pick = real.find((s) => d.chain && chainKeyOf(s.chain) === d.chain) || real.find((s) => String(s.id) === lastStore) || real[0];
+    const stores = real.length
+      ? `<label class="field"><span>Which store is this receipt from?</span><select name="store">${real.map((s) => `<option value="${s.id}" ${pick && s.id === pick.id ? 'selected' : ''}>${esc(s.name)} (${s.distance} mi)</option>`).join('')}</select></label>`
+      : '<p class="err" role="alert">No real stores near you are listed yet. Add your store first, then scan again.</p><button type="button" class="btn quiet" data-action="add-store-open">Add a store</button>';
+    const lines = d.lines.map((l, i) => {
+      const c = l.candidates[0];
+      const good = c && c.score >= 0.6;
+      return `<li class="rline"><label class="check-line"><input type="checkbox" name="inc-${i}" ${good ? 'checked' : ''} ${c ? '' : 'disabled'} aria-label="Save ${esc(l.name)}"> <span class="grow"><span class="name">${esc(l.name)}</span>${l.qty > 1 ? ` <span class="qty">× ${l.qty}</span>` : ''}</span></label>
+        ${c ? `<select name="pid-${i}" aria-label="Item for ${esc(l.name)}">${l.candidates.map((x) => `<option value="${x.product_id}">${esc(x.name)}</option>`).join('')}</select>`
+          : '<span class="sub">No matching item. Add it to your list and scan again.</span>'}
+        <span class="money"><b>$</b><input name="price-${i}" inputmode="decimal" value="${l.price.toFixed(2)}" aria-label="Price of ${esc(l.name)}"></span>
+        <input type="hidden" name="qty-${i}" value="${l.qty}"></li>`;
+    }).join('');
+    setSheetBody(`<form data-form="receipt-save" data-n="${d.lines.length}" novalidate>
+      <div id="receipt-err"></div>${stores}
+      <p class="sub">Check each match and price. Only ticked lines are saved. Unticked or unmatched lines are ignored.</p>
+      <ul class="rlines">${lines}</ul>
+      <p class="sub gap">Saving shares these prices with other shoppers (5 points each, up to your daily limit), adds them to your purchase history, and removes them from your list.</p>
+      <button class="btn wide" type="submit" ${real.length ? '' : 'disabled'}>Save prices</button></form>`);
+  }
+  const chainKeyOf = (chain) => Object.keys(state.brands).find((k) => String(chain || '').toLowerCase().replace(/[^a-z]/g, '').startsWith(k));
 
   async function openStore(id) {
     openSheet('Store', loading());
@@ -823,6 +895,8 @@
       api('PATCH', '/api/prefs', { strategy: el.dataset.s }).then((r) => { state.user = r.user; }).catch((e) => toast(e.message));
     },
     remove: (el) => openRemove(Number(el.dataset.id)),
+    receipt: () => openReceipt(),
+    'add-store-open': () => openAddStore(),
     'remove-yes': async (el) => {
       const chain = $('#rm-chain') ? $('#rm-chain').value : '';
       const raw = $('#rm-paid') ? $('#rm-paid').value.trim() : '';
@@ -830,8 +904,10 @@
       if (raw && !(paid > 0)) { setErr('#rm-err', 'Enter the price like 3.49, or leave it blank.'); return; }
       try {
         const r = await api('POST', `/api/list/${el.dataset.id}/remove`, { bought: true, chain: chain || null, paid });
+        if (chain) safeStore.set('lastChain', chain);
         closeSheet();
-        toast(`Marked ${r.name} as bought.`, async () => {
+        const shared = r.price_shared ? ` Price shared with ${r.price_shared.store}${r.price_shared.points ? `, +${r.price_shared.points} points` : ''}.` : '';
+        toast(`Marked ${r.name} as bought.${shared}`, async () => {
           try { await api('POST', `/api/purchases/${r.purchase_id}/undo`, {}); toast('Put back on your list.'); await loadBasket(); } catch (e) { toast(e.message); }
         });
         await loadBasket();
@@ -1020,6 +1096,27 @@
         closeSheet(); state.nearStores = null; toast('Store added.'); loadTab();
       } catch (e) { setErr('#store-err', e.message); }
     },
+    'receipt-text': async (f) => {
+      const text = String(new FormData(f).get('text') || '').trim();
+      if (!text) { receiptStart('Paste the receipt text or choose a photo.'); return; }
+      await readReceipt({ text });
+    },
+    'receipt-save': async (f) => {
+      const fd = new FormData(f);
+      const items = [];
+      for (let i = 0; i < Number(f.dataset.n); i += 1) {
+        if (fd.get(`inc-${i}`) !== 'on') continue;
+        const price = parsePrice(fd.get(`price-${i}`));
+        if (!(price > 0)) { setErr('#receipt-err', 'Check the prices you ticked.'); return; }
+        items.push({ product_id: Number(fd.get(`pid-${i}`)), price, qty: Number(fd.get(`qty-${i}`)) || 1 });
+      }
+      if (!items.length) { setErr('#receipt-err', 'Tick at least one line to save.'); return; }
+      try {
+        const r = await api('POST', '/api/receipts/submit', { store_id: Number(fd.get('store')), items });
+        safeStore.set('lastStore', String(fd.get('store')));
+        closeSheet(); await refreshUser(); invalidateData(); render(); loadTab(); toast(r.message);
+      } catch (e) { setErr('#receipt-err', e.message); }
+    },
     prefs: async (f) => {
       const fd = new FormData(f);
       const num = (k) => { const v = String(fd.get(k) || '').trim(); return v === '' ? null : parsePrice(v); };
@@ -1067,7 +1164,14 @@
     if (btn) btn.disabled = true;
     Promise.resolve(forms[f.dataset.form](f)).finally(() => { if (btn && document.contains(btn)) btn.disabled = false; });
   });
-  document.addEventListener('change', (ev) => {
+  document.addEventListener('change', async (ev) => {
+    if (ev.target.matches('#receipt-file')) {
+      const file = ev.target.files[0];
+      if (!file) return;
+      setSheetBody(loading('Preparing your photo…'));
+      try { await readReceipt({ image: await fileToJpeg(file), mime: 'image/jpeg' }); } catch (e) { receiptStart(e.message); }
+      return;
+    }
     if (ev.target.matches('[data-program]')) {
       const boxes = [...document.querySelectorAll('[data-program]')];
       api('PATCH', '/api/prefs', { programs: boxes.filter((b) => b.checked).map((b) => b.dataset.program) })

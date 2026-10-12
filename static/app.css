@@ -316,3 +316,12 @@ h3.sec { font: 700 20px/1.2 var(--display); padding: 16px 20px 6px; margin: 0; }
 .offer-card .src { margin-top: 4px; font-size: 12px; }
 .row.top { align-items: flex-start; }
 .toast span { overflow-wrap: anywhere; }
+
+/* ---------- receipts and removal sheet ---------- */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.rlines { list-style: none; margin: 8px 0; padding: 0; }
+.rline { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line); }
+.rline .check-line { align-items: flex-start; }
+.rline .grow { flex: 1; min-width: 0; }
+.rline .money { max-width: 160px; }
+.sheet .pair .field { padding-bottom: 8px; }

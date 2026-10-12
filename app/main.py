@@ -14,7 +14,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from datetime import datetime, timedelta
 
-from . import brands, geo, providers, replenish, scoring
+from . import brands, geo, providers, receipts, replenish, scoring
 from .basket import build_basket
 from .compare import STRATEGIES, build_compare
 from .db import DB_PATH, LATEST_PRICES_SQL, get_conn, init_db
@@ -603,6 +603,45 @@ def add_review(store_id):
 
 # ---------- price reports ----------
 
+def _save_price(c, uid, product_id, store_id, price, corrects=None):
+    """Record one shopper price report and award points. Returns (price_id, status, earned, message)."""
+    if not c.execute("SELECT 1 FROM stores WHERE id = ?", (store_id,)).fetchone():
+        raise LookupError("We couldn't find that store.")
+    if not c.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone():
+        raise LookupError("We couldn't find that item.")
+    c.execute("INSERT OR IGNORE INTO listings (product_id, store_id) VALUES (?, ?)", (product_id, store_id))
+    lid = c.execute("SELECT id FROM listings WHERE product_id = ? AND store_id = ?",
+                    (product_id, store_id)).fetchone()["id"]
+    known = [r["price"] for r in c.execute(
+        "SELECT price FROM (" + LATEST_PRICES_SQL + ") WHERE product_id = ?", (product_id,))]
+    med = scoring.median(known) if len(known) >= 3 else None
+    status = "ok" if scoring.is_plausible(price, med) else "pending"
+    already_today = c.execute(
+        "SELECT 1 FROM prices WHERE listing_id = ? AND user_id = ? "
+        "AND scraped_at >= datetime('now', '-1 day')", (lid, uid)).fetchone()
+    cur = c.execute(
+        "INSERT INTO prices (listing_id, price, source, user_id, status, corrects_price_id) "
+        "VALUES (?, ?, 'user', ?, ?, ?)", (lid, price, uid, status, corrects))
+    price_id = cur.lastrowid
+    earned = 0
+    if status == "pending":
+        msg = ("That price looks unusual, so it needs confirmation from two other "
+               "shoppers before it counts.")
+    elif already_today:
+        msg = "Saved. You already reported this item here today, so there are no extra points."
+    elif scoring.count_recent(c, uid, "report") >= scoring.DAILY_REPORT_CAP:
+        msg = "Saved. You've reached today's limit for report points."
+    else:
+        scoring.award(c, uid, scoring.REPORT_POINTS, "report", price_id)
+        earned = scoring.REPORT_POINTS
+        msg = f"Thanks. You earned {earned} points."
+    if corrects:
+        orig = c.execute("SELECT * FROM prices WHERE id = ? AND listing_id = ?", (corrects, lid)).fetchone()
+        if orig and orig["user_id"] != uid and abs(price - orig["price"]) >= 0.05 * orig["price"]:
+            c.execute("UPDATE prices SET disputed_count = disputed_count + 1 WHERE id = ?", (corrects,))
+    return price_id, status, earned, msg
+
+
 @app.post("/api/prices")
 @login_required
 def submit_price():
@@ -618,44 +657,11 @@ def submit_price():
         corrects = int(b["corrects_price_id"]) if b.get("corrects_price_id") else None
     except (TypeError, ValueError):
         corrects = None
-    uid = g.user["id"]
     with get_conn() as c:
-        if not c.execute("SELECT 1 FROM stores WHERE id = ?", (store_id,)).fetchone():
-            return err("We couldn't find that store.", 404)
-        if not c.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone():
-            return err("We couldn't find that item.", 404)
-        c.execute("INSERT OR IGNORE INTO listings (product_id, store_id) VALUES (?, ?)",
-                  (product_id, store_id))
-        lid = c.execute("SELECT id FROM listings WHERE product_id = ? AND store_id = ?",
-                        (product_id, store_id)).fetchone()["id"]
-        known = [r["price"] for r in c.execute(
-            "SELECT price FROM (" + LATEST_PRICES_SQL + ") WHERE product_id = ?", (product_id,))]
-        med = scoring.median(known) if len(known) >= 3 else None
-        status = "ok" if scoring.is_plausible(price, med) else "pending"
-        already_today = c.execute(
-            "SELECT 1 FROM prices WHERE listing_id = ? AND user_id = ? "
-            "AND scraped_at >= datetime('now', '-1 day')", (lid, uid)).fetchone()
-        cur = c.execute(
-            "INSERT INTO prices (listing_id, price, source, user_id, status, corrects_price_id) "
-            "VALUES (?, ?, 'user', ?, ?, ?)", (lid, price, uid, status, corrects))
-        price_id = cur.lastrowid
-        earned = 0
-        if status == "pending":
-            msg = ("That price looks unusual, so it needs confirmation from two other "
-                   "shoppers before it counts.")
-        elif already_today:
-            msg = "Saved. You already reported this item here today, so there are no extra points."
-        elif scoring.count_recent(c, uid, "report") >= scoring.DAILY_REPORT_CAP:
-            msg = "Saved. You've reached today's limit for report points."
-        else:
-            scoring.award(c, uid, scoring.REPORT_POINTS, "report", price_id)
-            earned = scoring.REPORT_POINTS
-            msg = f"Thanks. You earned {earned} points."
-        if corrects:
-            orig = c.execute("SELECT * FROM prices WHERE id = ? AND listing_id = ?",
-                             (corrects, lid)).fetchone()
-            if orig and orig["user_id"] != uid and abs(price - orig["price"]) >= 0.05 * orig["price"]:
-                c.execute("UPDATE prices SET disputed_count = disputed_count + 1 WHERE id = ?", (corrects,))
+        try:
+            price_id, status, earned, msg = _save_price(c, g.user["id"], product_id, store_id, price, corrects)
+        except LookupError as e:
+            return err(str(e), 404)
     return jsonify(id=price_id, status=status, points=earned, message=msg), 201
 
 
@@ -996,6 +1002,30 @@ def _record_purchase(c, uid, pid, qty, chain=None, paid=None):
     return cur.lastrowid
 
 
+def _nearest_store(c, chain):
+    """Nearest real (non-sample) store of a chain within the shopper's search radius."""
+    best = None
+    for r in c.execute("SELECT id, name, chain, lat, lng FROM stores WHERE source != 'demo' AND lat IS NOT NULL"):
+        if brands.chain_key(r["chain"]) != chain:
+            continue
+        d = geo.haversine_miles(g.user["lat"], g.user["lng"], r["lat"], r["lng"])
+        if d <= g.user["radius_miles"] and (best is None or d < best[0]):
+            best = (d, r)
+    return best[1] if best else None
+
+
+def _share_price(c, uid, product_id, chain, paid):
+    """Turn a price paid into a shopper price report, so checking items off feeds the data."""
+    store = _nearest_store(c, chain)
+    if not store:
+        return None
+    try:
+        _, status, earned, _ = _save_price(c, uid, product_id, store["id"], paid)
+    except LookupError:
+        return None
+    return {"store": store["name"], "points": earned, "status": status}
+
+
 @app.post("/api/list/<int:item_id>/remove")
 @login_required
 def list_remove(item_id):
@@ -1016,12 +1046,15 @@ def list_remove(item_id):
                        "WHERE li.id = ? AND li.user_id = ?", (item_id, uid)).fetchone()
         if not it:
             return err("We couldn't find that list item.", 404)
-        pid = None
+        pid, shared = None, None
         if b["bought"]:
             _item_pref(c, uid, it["product_id"])
             pid = _record_purchase(c, uid, it["product_id"], it["qty"], chain, paid)
+            if chain and paid:
+                shared = _share_price(c, uid, it["product_id"], chain, paid)
         c.execute("DELETE FROM list_items WHERE id = ? AND user_id = ?", (item_id, uid))
-    return jsonify(ok=True, purchase_id=pid, product_id=it["product_id"], qty=it["qty"], name=it["name"])
+    return jsonify(ok=True, purchase_id=pid, product_id=it["product_id"], qty=it["qty"], name=it["name"],
+                   price_shared=shared)
 
 
 @app.post("/api/purchases/<int:purchase_id>/undo")
@@ -1182,6 +1215,85 @@ def product_prefs(product_id):
         if b.get("excluded"):   # an excluded product leaves the active list too
             c.execute("DELETE FROM list_items WHERE user_id = ? AND product_id = ?", (uid, product_id))
     return jsonify(ok=True)
+
+
+# ---------- receipts ----------
+
+@app.post("/api/receipts/read")
+@login_required
+def receipt_read():
+    """Read a receipt (pasted text or a photo) and propose matches. Saves nothing."""
+    request.max_content_length = 2_000_000
+    b = request.get_json(silent=True) or {}
+    text = str(b.get("text") or "")
+    if b.get("image"):
+        if b.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
+            return err("Use a JPEG, PNG or WebP photo.")
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            return err("Reading photos isn't set up on this server. Paste the receipt text instead, or ask "
+                       "whoever runs the server to set ANTHROPIC_API_KEY.", 503)
+        if too_many(("receipt", g.user["id"]), 20, 86400):
+            return err("You've reached today's receipt limit.", 429)
+        try:
+            text = receipts.read_image(b["image"], b["mime"])
+        except Exception:
+            return err("We couldn't read that photo. Try a clearer one, or paste the text.", 502)
+    if len(text) > 20000 or not text.strip():
+        return err("Paste the receipt text or choose a photo.")
+    parsed = receipts.parse_text(text)
+    with get_conn() as c:
+        products = rows(c.execute("SELECT id, name, brand FROM products"))
+    out = []
+    for ln in parsed["lines"]:
+        cands = receipts.match(ln["name"], products)
+        out.append({**ln, "candidates": [{"product_id": p["id"], "name": p["name"], "score": s} for s, p in cands]})
+    return jsonify(chain=parsed["chain"], lines=out, ai=bool(b.get("image")))
+
+
+@app.post("/api/receipts/submit")
+@login_required
+def receipt_submit():
+    """Save reviewed receipt lines: a price report for each, plus purchase history."""
+    b = request.get_json(silent=True) or {}
+    try:
+        store_id = int(b["store_id"])
+    except (KeyError, TypeError, ValueError):
+        return err("Choose the store this receipt is from.")
+    items = b.get("items")
+    if not isinstance(items, list) or not 1 <= len(items) <= 80:
+        return err("Choose at least one item to save.")
+    uid, saved, points, bought, seen = g.user["id"], 0, 0, 0, set()
+    with get_conn() as c:
+        st = c.execute("SELECT * FROM stores WHERE id = ?", (store_id,)).fetchone()
+        if not st:
+            return err("We couldn't find that store.", 404)
+        chain = brands.chain_key(st["chain"])
+        for it in items:
+            try:
+                pid, price = int(it["product_id"]), round(float(it["price"]), 2)
+                qty = max(1, min(99, int(it.get("qty") or 1)))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if pid in seen or not 0.05 <= price <= 999:
+                continue
+            seen.add(pid)
+            try:
+                _, status, earned, _ = _save_price(c, uid, pid, store_id, price)
+            except LookupError:
+                continue
+            saved += 1
+            points += earned
+            if b.get("record_purchases", True):
+                dup = c.execute("SELECT 1 FROM purchases WHERE user_id = ? AND product_id = ? "
+                                "AND date(bought_at) = date('now')", (uid, pid)).fetchone()
+                if not dup:
+                    _item_pref(c, uid, pid)
+                    _record_purchase(c, uid, pid, qty, chain, price)
+                    bought += 1
+                c.execute("DELETE FROM list_items WHERE user_id = ? AND product_id = ?", (uid, pid))
+    return jsonify(ok=True, saved=saved, points=points, purchases=bought,
+                   message=f"Saved {saved} price{'s' if saved != 1 else ''}"
+                           + (f" and earned {points} points." if points else "."))
 
 
 # ---------- feedback and admin ----------

@@ -130,3 +130,8 @@ deploy/     systemd files for a Linux home server
 - **Restock reminders:** learned from purchase history (median gap between purchases), always labeled as estimates. Set your own interval and quantity, snooze, dismiss, mark restocked, or turn reminders off.
 - **Comparison:** per item and per list, with lowest cost, fewest stores, or best value (extra stops must beat your minimum saving after estimated driving).
 - **Honest data:** every price is labeled Verified, Unconfirmed or Sample, and missing data is shown as missing. Deals and coupons appear only if real offers are loaded; none are included. Offers are loaded with `POST /api/admin/offers` (needs `ADMIN_TOKEN`) or by adding a provider in `app/providers.py`. No store feed is connected yet.
+
+### Fast price sharing
+- **Check items off with a price:** in "Did you buy this item?", pick the store and enter the price paid. If a real (non-sample) store of that chain is within your search distance, the price is shared as a report and earns points. The store is remembered for next time.
+- **Scan a receipt** (List tab, or Rewards > Report a price): paste the receipt text, or take a photo. You review the matches and prices, then save. Saving shares the prices, adds them to purchase history (so restock estimates learn faster), and takes those items off your list.
+- Photo reading needs `ANTHROPIC_API_KEY` on the server and sends the photo to Anthropic's API; it has not been tested against the live API. Pasted text needs no setup.
