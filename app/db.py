@@ -209,6 +209,33 @@ CREATE TABLE IF NOT EXISTS offers (
     fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_offers_chain ON offers(chain, expires_on);
+-- Which online-store item stands for one of our products. Only confirmed links ever produce prices.
+CREATE TABLE IF NOT EXISTS product_links (
+    id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    chain TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    brand TEXT,
+    url TEXT,
+    price_seen REAL,
+    seen_zip TEXT,
+    seen_at TEXT,
+    score REAL,
+    status TEXT NOT NULL DEFAULT 'suggested',     -- suggested | confirmed | rejected
+    UNIQUE(product_id, chain, external_id)
+);
+CREATE TABLE IF NOT EXISTS sync_log (
+    id INTEGER PRIMARY KEY,
+    chain TEXT NOT NULL,
+    zip TEXT NOT NULL,
+    state TEXT NOT NULL,                          -- running | done | error
+    message TEXT NOT NULL DEFAULT '',
+    prices INTEGER NOT NULL DEFAULT 0,
+    suggestions INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+);
 """
 
 REWARDS = [

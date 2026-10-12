@@ -14,7 +14,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from datetime import datetime, timedelta
 
-from . import brands, geo, providers, receipts, replenish, scoring
+from . import apify, brands, geo, providers, receipts, replenish, scoring
 from .basket import build_basket
 from .compare import STRATEGIES, build_compare
 from .db import DB_PATH, LATEST_PRICES_SQL, get_conn, init_db
@@ -510,7 +510,7 @@ def stores_nearby():
             "SELECT s.id, s.name, s.chain, s.address, s.zip, s.lat, s.lng, s.source, "
             "(SELECT ROUND(AVG(rating), 1) FROM store_reviews WHERE store_id = s.id) AS rating, "
             "(SELECT COUNT(*) FROM store_reviews WHERE store_id = s.id) AS review_count "
-            "FROM stores s WHERE s.lat IS NOT NULL"))
+            "FROM stores s WHERE s.lat IS NOT NULL AND s.source != 'apify'"))
     out = sorted(nearby(data, radius), key=lambda s: s["distance"])
     for s in out:
         s["sample"] = s.pop("source") == "demo"
@@ -678,7 +678,7 @@ def verify_feed():
             "FROM prices p JOIN listings l ON l.id = p.listing_id "
             "JOIN products pr ON pr.id = l.product_id JOIN stores s ON s.id = l.store_id "
             "LEFT JOIN users u ON u.id = p.user_id "
-            "WHERE p.status IN ('ok', 'pending') AND (p.user_id IS NULL OR p.user_id != ?) "
+            "WHERE p.status IN ('ok', 'pending') AND p.source != 'apify' AND (p.user_id IS NULL OR p.user_id != ?) "
             "AND p.id = (SELECT id FROM prices WHERE listing_id = l.id AND status IN ('ok','pending') "
             "            ORDER BY scraped_at DESC, id DESC LIMIT 1) "
             "AND p.scraped_at >= datetime('now', ?) "
@@ -1005,7 +1005,7 @@ def _record_purchase(c, uid, pid, qty, chain=None, paid=None):
 def _nearest_store(c, chain):
     """Nearest real (non-sample) store of a chain within the shopper's search radius."""
     best = None
-    for r in c.execute("SELECT id, name, chain, lat, lng FROM stores WHERE source != 'demo' AND lat IS NOT NULL"):
+    for r in c.execute("SELECT id, name, chain, lat, lng FROM stores WHERE source NOT IN ('demo', 'apify') AND lat IS NOT NULL"):
         if brands.chain_key(r["chain"]) != chain:
             continue
         d = geo.haversine_miles(g.user["lat"], g.user["lng"], r["lat"], r["lng"])
@@ -1294,6 +1294,71 @@ def receipt_submit():
     return jsonify(ok=True, saved=saved, points=points, purchases=bought,
                    message=f"Saved {saved} price{'s' if saved != 1 else ''}"
                            + (f" and earned {points} points." if points else "."))
+
+
+# ---------- online prices (Apify) ----------
+
+def _online_state(c, uid):
+    pids = [r["product_id"] for r in c.execute(
+        "SELECT product_id FROM list_items WHERE user_id = ? AND checked = 0", (uid,))]
+    links = []
+    if pids:
+        links = rows(c.execute(
+            "SELECT pl.id, pl.product_id, p.name AS product, pl.title, pl.brand, pl.url, pl.price_seen, "
+            "pl.seen_zip, pl.status, pl.score FROM product_links pl JOIN products p ON p.id = pl.product_id "
+            "WHERE pl.chain = 'walmart' AND pl.status IN ('suggested', 'confirmed') AND pl.product_id IN (%s) "
+            "ORDER BY p.name, pl.status, pl.score DESC" % ",".join("?" * len(pids)), pids))
+    last = c.execute("SELECT * FROM sync_log WHERE chain = 'walmart' ORDER BY id DESC LIMIT 1").fetchone()
+    last = dict(last) if last else None
+    if last and last["state"] == "running" and c.execute(
+            "SELECT ? < datetime('now', '-15 minutes')", (last["started_at"],)).fetchone()[0]:
+        last["state"], last["message"] = "error", "The last sync didn't finish."
+    unlinked = [r["name"] for r in c.execute(
+        "SELECT p.name FROM list_items li JOIN products p ON p.id = li.product_id WHERE li.user_id = ? AND li.checked = 0 "
+        "AND NOT EXISTS (SELECT 1 FROM product_links x WHERE x.product_id = p.id AND x.chain = 'walmart' "
+        "AND x.status IN ('confirmed', 'suggested'))", (uid,))]
+    return {"configured": apify.configured(), "last": last, "links": links, "unmatched": unlinked}
+
+
+@app.get("/api/online")
+@login_required
+def online_get():
+    with get_conn() as c:
+        return jsonify(_online_state(c, g.user["id"]))
+
+
+@app.post("/api/online/sync")
+@login_required
+def online_sync():
+    if not apify.configured():
+        return err("Online prices aren't set up on this server. It needs an APIFY_TOKEN.", 503)
+    if too_many(("apify", g.user["zip"]), 4, 86400):
+        return err("Online prices were already refreshed several times today for your ZIP. Try again tomorrow.", 429)
+    with get_conn() as c:
+        pids = [r["product_id"] for r in c.execute(
+            "SELECT product_id FROM list_items WHERE user_id = ? AND checked = 0", (g.user["id"],))]
+    if not pids:
+        return err("Add items to your list first.")
+    if apify.start(g.user["zip"], g.user["lat"], g.user["lng"], pids) is None:
+        return err("A refresh is already running. Check back in a minute.", 409)
+    return jsonify(ok=True), 202
+
+
+@app.post("/api/online/links/<int:link_id>")
+@login_required
+def online_link(link_id):
+    action = (request.get_json(silent=True) or {}).get("action")
+    with get_conn() as c:
+        if action == "confirm":
+            if not apify.confirm_link(c, link_id, g.user["zip"], g.user["lat"], g.user["lng"]):
+                return err("We couldn't find that match.", 404)
+        elif action in ("reject", "remove"):
+            cur = c.execute("UPDATE product_links SET status = 'rejected' WHERE id = ?", (link_id,))
+            if cur.rowcount == 0:
+                return err("We couldn't find that match.", 404)
+        else:
+            return err("Choose confirm or reject.")
+    return jsonify(ok=True)
 
 
 # ---------- feedback and admin ----------

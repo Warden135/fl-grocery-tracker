@@ -65,7 +65,7 @@
   // ---------- state ----------
   const state = {
     user: null, ready: false, tab: 'list', authMode: 'signup', authError: '',
-    basket: null, plan: 1, compare: null, reminders: null, deals: null, purchases: null,
+    basket: null, plan: 1, compare: null, reminders: null, deals: null, purchases: null, online: null,
     ltab: 'items', rsub: 'points', brands: {}, toastUndo: null, programsSaving: false,
     feed: null, nearStores: null, report: { storeId: safeStore.get('lastStore') || '', product: null, error: '' },
     editingPrice: null, printTag: true, authDraft: {},
@@ -119,7 +119,7 @@
     return b.logo ? `<img class="brand-logo ${cls}" src="${esc(b.logo)}" alt="${esc(b.name)}">`
       : `<span class="brand b-${esc(k)} ${cls}">${esc(b.name)}</span>`;
   }
-  const QTEXT = { verified: 'Verified', reported: 'Unconfirmed', sample: 'Sample' };
+  const QTEXT = { verified: 'Verified', online: 'Online price', reported: 'Unconfirmed', sample: 'Sample' };
   function qualityChip(v) {
     const parts = [`<span class="qchip q-${v.quality}">${QTEXT[v.quality]}</span>`];
     if (v.stale) parts.push('<span class="qchip q-stale">Old price</span>');
@@ -234,7 +234,7 @@
       right = `<span class="price-col">${mini(best.effective)}${chainBadge(ci.best, 'sm')}</span>`;
       const n = Object.values(ci.prices).filter(Boolean).length;
       sub = n > 1 ? `Lowest of ${n} stores${ci.save_vs_next > 0 ? `, saves ${money(ci.save_vs_next)}` : ''}` : `Only ${brandOf(ci.best).name} has data`;
-      if (best.quality !== 'verified') sub += best.quality === 'sample' ? ' (sample)' : ' (unconfirmed)';
+      if (best.quality === 'sample' || best.quality === 'reported') sub += best.quality === 'sample' ? ' (sample)' : ' (unconfirmed)';
     } else if (ci && ci.reason && Object.values(ci.prices).some(Boolean)) {
       const k = Object.keys(ci.prices).find((x) => ci.prices[x]);
       right = `<span class="price-col">${mini(ci.prices[k].effective)}${chainBadge(k, 'sm')}</span>`;
@@ -313,9 +313,10 @@
     }
     const totals = c.singles.length ? `<h2>If you shop at just one store</h2><ul class="rows">${c.singles.map((s) => `<li class="row"><div class="grow">${chainBadge(s.chain, 'sm')}<div class="sub">${esc(s.store)}, ${s.distance} mi${s.missing ? ` <span class="miss">missing ${s.missing}</span>` : ''}</div>
         ${s.offer_savings > 0 ? `<div class="sub good">Includes ${money(s.offer_savings)} in deals</div>` : ''}${s.vs_priciest > 0 ? `<div class="sub good">${money(s.vs_priciest)} less than the priciest option</div>` : ''}</div><span class="total">${money(s.total)}</span></li>`).join('')}</ul>` : '';
+    const onlineHint = c.flags.online ? '' : `<p class="sub pad">Want Walmart.com prices for your ZIP? <button class="link" data-action="tab" data-tab="me">Set up online prices</button></p>`;
     const notes = c.notes.length ? `<ul class="notes">${c.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : '';
     const other = state.basket && state.basket.stores.length ? `<details class="other"><summary>All stores within ${state.basket.radius} miles, any chain</summary>${state.basket.stores.map(storeDetails).join('')}</details>` : '';
-    return seg + hero + totals + notes + `<h2>Item by item</h2>` + active.map(itemCompare).join('') + other;
+    return seg + hero + totals + notes + onlineHint + `<h2>Item by item</h2>` + active.map(itemCompare).join('') + other;
   }
 
   function storeDetails(s) {
@@ -518,6 +519,45 @@
     return `<p class="lead">${plural(h.total, 'purchase', 'purchases')} recorded.</p>${sv}${list}`;
   }
 
+  function onlineSection() {
+    const o = state.online;
+    if (!o) return loading();
+    if (!o.configured) {
+      return `<p class="lead">Walmart.com prices for your ZIP can be pulled in through Apify, a paid scraping service. It isn't set up on this server. Whoever runs it needs an Apify account and an <code>APIFY_TOKEN</code> (see the README).</p>`;
+    }
+    const last = o.last;
+    const running = last && last.state === 'running';
+    const status = running ? 'Refreshing prices from Walmart.com. This can take a few minutes.'
+      : last ? (last.state === 'error' ? `Last refresh failed: ${last.message}` : `Last refresh ${fmtDate(last.finished_at)}: ${plural(last.prices, 'price', 'prices')} saved, ${plural(last.suggestions, 'new match', 'new matches')} to check.`)
+        : 'Not refreshed yet.';
+    const sug = o.links.filter((l) => l.status === 'suggested');
+    const ok = o.links.filter((l) => l.status === 'confirmed');
+    const matchRows = sug.length ? `<h3 class="sec">Is this the same item?</h3><p class="lead">Confirm only if the brand and size match what you buy. Prices are saved only for items you confirm.</p><ul class="rows">${sug.map((l) => `<li class="row top"><div class="grow">
+        <div class="name">${esc(l.product)}</div>
+        <div class="sub">Walmart.com: ${esc(l.title)}${l.brand ? ` (${esc(l.brand)})` : ''}, ${money(l.price_seen)} for ZIP ${esc(l.seen_zip || '')}</div>
+        <div class="actions"><button class="btn small" data-action="link" data-do="confirm" data-id="${l.id}">Same item</button>
+          <button class="btn small quiet" data-action="link" data-do="reject" data-id="${l.id}">Not this</button></div></div></li>`).join('')}</ul>` : '';
+    const using = ok.length ? `<h3 class="sec">Using from Walmart.com</h3><ul class="rows">${ok.map((l) => `<li class="row"><div class="grow"><div class="name">${esc(l.product)}</div><div class="sub">${esc(l.title)}${l.price_seen != null ? `, ${money(l.price_seen)}` : ''}</div></div>
+        <button class="link danger" data-action="link" data-do="reject" data-id="${l.id}" aria-label="Stop using ${esc(l.title)}">Stop</button></li>`).join('')}</ul>` : '';
+    const un = o.unmatched.length ? `<p class="sub pad">Not searched yet: ${esc(o.unmatched.join(', '))}.</p>` : '';
+    return `<p class="lead">Prices from Walmart.com for ZIP ${esc(state.user.zip)}. They show as "Online price", not as a shelf price in a store.</p>
+      <p class="sub pad">${esc(status)}</p>
+      <div class="pad"><button class="btn quiet" data-action="online-sync" ${running ? 'disabled' : ''}>Refresh Walmart.com prices for my list</button>
+      <p class="sub gap">Each refresh costs a little on the Apify account, so it's limited to a few times a day.</p></div>${un}${matchRows}${using}`;
+  }
+
+  let onlinePoll;
+  function pollOnline(tries = 0) {
+    clearTimeout(onlinePoll);
+    onlinePoll = setTimeout(async () => {
+      const o = await tryApi('/api/online');
+      if (!o) return;
+      state.online = o;
+      if (o.last && o.last.state === 'running' && tries < 100) { if (state.tab === 'me') render(); pollOnline(tries + 1); }
+      else { state.compare = null; if (state.tab === 'me') loadMe(); }
+    }, 3000);
+  }
+
   function meView() {
     const u = state.user;
     const alerts = state.alerts === null ? loading()
@@ -540,6 +580,7 @@
       <h2>Shopping preferences</h2>${prefsForm()}
       <h2>Restock reminders</h2>${restockSection()}
       <h2>Purchase history</h2>${historySection()}
+      <h2>Online prices</h2>${onlineSection()}
       <h2>Price alerts</h2>${alerts}
       <h2>Stores and reviews</h2>${stores}
       <h2>Send feedback</h2>
@@ -607,8 +648,9 @@
     render();
   }
   async function loadMe() {
-    const [a, s, r, p] = await Promise.all([tryApi('/api/alerts'), tryApi('/api/stores/nearby'),
-      tryApi('/api/reminders'), tryApi('/api/purchases')]);
+    const [a, s, r, p, o] = await Promise.all([tryApi('/api/alerts'), tryApi('/api/stores/nearby'),
+      tryApi('/api/reminders'), tryApi('/api/purchases'), tryApi('/api/online')]);
+    if (o) state.online = o;
     if (a) state.alerts = a;
     if (s) state.nearStores = s.stores;
     if (r) state.reminders = r;
@@ -637,7 +679,7 @@
     $('#main') && $('#main').focus({ preventScroll: true });
   }
   function invalidateData() {
-    state.basket = null; state.compare = null; state.reminders = null; state.deals = null; state.purchases = null;
+    state.basket = null; state.compare = null; state.reminders = null; state.deals = null; state.purchases = null; state.online = null;
     state.feed = null; state.nearStores = null; state.rewards = null; state.alerts = null;
   }
 
@@ -896,6 +938,12 @@
     },
     remove: (el) => openRemove(Number(el.dataset.id)),
     receipt: () => openReceipt(),
+    'online-sync': async () => {
+      try { await api('POST', '/api/online/sync'); toast('Refreshing. This can take a few minutes.'); state.online = (await api('GET', '/api/online')); render(); pollOnline(); } catch (e) { toast(e.message); }
+    },
+    link: async (el) => {
+      try { await api('POST', `/api/online/links/${el.dataset.id}`, { action: el.dataset.do }); state.compare = null; toast(el.dataset.do === 'confirm' ? 'Saved. Walmart.com price added.' : 'Okay.'); await loadMe(); } catch (e) { toast(e.message); }
+    },
     'add-store-open': () => openAddStore(),
     'remove-yes': async (el) => {
       const chain = $('#rm-chain') ? $('#rm-chain').value : '';

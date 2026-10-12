@@ -263,7 +263,7 @@ def test_compare_three_chains_picks_lowest_and_explains():
     totals = {s["chain"]: s["total"] for s in r["singles"]}
     assert totals == {"walmart": 3.49 + 5.58, "winndixie": 3.79 + 5.98, "publix": 3.99 + 6.98}
     assert r["singles"][0]["chain"] == "walmart" and r["singles"][0]["vs_priciest"] == round(10.97 - 9.07, 2)
-    assert r["flags"] == {"sample": False, "unconfirmed": False, "stale": False}
+    assert r["flags"] == {"sample": False, "unconfirmed": False, "stale": False, "online": False}
 
 
 def test_compare_never_invents_prices():

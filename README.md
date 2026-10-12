@@ -135,3 +135,12 @@ deploy/     systemd files for a Linux home server
 - **Check items off with a price:** in "Did you buy this item?", pick the store and enter the price paid. If a real (non-sample) store of that chain is within your search distance, the price is shared as a report and earns points. The store is remembered for next time.
 - **Scan a receipt** (List tab, or Rewards > Report a price): paste the receipt text, or take a photo. You review the matches and prices, then save. Saving shares the prices, adds them to purchase history (so restock estimates learn faster), and takes those items off your list.
 - Photo reading needs `ANTHROPIC_API_KEY` on the server and sends the photo to Anthropic's API; it has not been tested against the live API. Pasted text needs no setup.
+
+### Online prices from Walmart.com (Apify)
+Optional, paid by the run on your own Apify account.
+1. Create an account at apify.com and copy your API token (Settings, API and integrations).
+2. Put it in the server's `.env` as `APIFY_TOKEN=...` (never in chat or in git), then restart the app. On Windows, set `$env:APIFY_TOKEN="..."` before starting waitress.
+3. In the app: Me, Online prices, "Refresh Walmart.com prices for my list". It searches Walmart.com for your ZIP and proposes matches.
+4. Tap **Same item** only when brand and size match. Only confirmed items ever get prices, shown as "Online price" (for your ZIP on walmart.com, not a shelf price). Later refreshes update confirmed items by Walmart item ID.
+
+Notes: the connector uses the `crawloop/walmart-scraper` actor (change with `APIFY_WALMART_ACTOR`) following its published input and output format, and has not been run against the live service. Refreshes are limited to 4 per day per ZIP to control cost. Check Apify's current pricing and each store's terms before relying on it. Publix, Winn-Dixie and weekly ads can be added later the same way once a specific actor is chosen.

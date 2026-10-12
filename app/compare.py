@@ -77,7 +77,7 @@ def build_compare(items, price_rows, offers, center, radius, prefs, now=None):
         if d > radius:
             continue
         q = price_quality(r)
-        if verified_only and q != "verified":
+        if verified_only and q not in ("verified", "online"):
             hidden += 1
             continue
         s = stores.setdefault(r["store_id"], {"store_id": r["store_id"], "store": r["store"], "chain": key,
@@ -116,7 +116,7 @@ def build_compare(items, price_rows, offers, center, radius, prefs, now=None):
             notes.append(f"No {b['name']} store with price data within {radius} miles of your ZIP.")
 
     # ---- per item ----
-    out_items, has_sample, has_unconfirmed, stale_seen = [], False, False, False
+    out_items, has_sample, has_unconfirmed, stale_seen, has_online = [], False, False, False, False
     for it in items:
         pid, qty = it["product_id"], it["qty"]
         row = {"item_id": it["item_id"], "product_id": pid, "name": it["name"], "qty": qty, "checked": it["checked"],
@@ -133,6 +133,7 @@ def build_compare(items, price_rows, offers, center, radius, prefs, now=None):
             age = round(age_days(pr["seen_at"], now) or 0, 1)
             has_sample |= pr["quality"] == "sample"
             has_unconfirmed |= pr["quality"] == "reported"
+            has_online |= pr["quality"] == "online"
             stale_seen |= age > STALE_DAYS
             eff = offer[0] if offer else pr["price"]
             row["prices"][k] = {
@@ -164,7 +165,7 @@ def build_compare(items, price_rows, offers, center, radius, prefs, now=None):
                     why += f" with {v['offer']['title']} (shelf price {money(v['price'])})"
                 others = ", ".join(f"{brands.BY_KEY[a[2]]['name']} {money(a[0])}" for a in avail[1:])
                 why += f", versus {others}."
-                if v["quality"] != "verified":
+                if v["quality"] in ("sample", "reported"):
                     why += " This price is " + ("sample data." if v["quality"] == "sample" else "an unconfirmed shopper report.")
                 row["reason"] = why
         out_items.append(row)
@@ -299,6 +300,8 @@ def build_compare(items, price_rows, offers, center, radius, prefs, now=None):
         notes.append("Some prices are sample data, not real store prices. Totals are for demonstration only.")
     if has_unconfirmed:
         notes.append("Some prices are single shopper reports that nobody has confirmed yet.")
+    if has_online:
+        notes.append("Some prices come from the store's website for your ZIP code, not from a shelf in a specific store.")
     if stale_seen:
         notes.append(f"Some prices are over {STALE_DAYS} days old and may have changed.")
     if not offers:
@@ -309,5 +312,5 @@ def build_compare(items, price_rows, offers, center, radius, prefs, now=None):
         "chosen": chosen, "multi_verdict": multi_verdict, "budget": budget_info,
         "notes": notes, "scored_count": len(active),
         "min_savings": min_savings, "cost_per_mile": rate,
-        "flags": {"sample": has_sample, "unconfirmed": has_unconfirmed, "stale": stale_seen},
+        "flags": {"sample": has_sample, "unconfirmed": has_unconfirmed, "stale": stale_seen, "online": has_online},
     }

@@ -10,6 +10,7 @@ To connect a retailer feed later: write a class with `key`, `label`, `chains` an
 add it to PROVIDERS and call `import_offers()` on a schedule. Until you do, the app
 reports the chain as "not connected" instead of showing made-up deals.
 """
+import os
 from datetime import date
 
 from .db import get_conn
@@ -26,6 +27,8 @@ def price_quality(row):
     reported = a single unconfirmed shopper report."""
     if row.get("store_source") == "demo":
         return "sample"
+    if row.get("source") == "apify":
+        return "online"
     if row.get("source") == "scrape" or (row.get("verified_count") or 0) > 0:
         return "verified"
     return "reported"
@@ -33,6 +36,7 @@ def price_quality(row):
 
 QUALITY_TEXT = {
     "verified": "Verified",
+    "online": "Online price from the store's website",
     "reported": "Shopper report, not yet confirmed",
     "sample": "Sample data",
 }
@@ -68,6 +72,9 @@ def status():
         {"key": "scraper", "label": "Store websites (experimental)", "connected": scraped > 0,
          "detail": f"{scraped} price{'s' if scraped != 1 else ''} collected." if scraped
          else "No prices collected yet. The scraper has to be configured per store page."},
+        {"key": "apify", "label": "Walmart.com prices (Apify)", "connected": bool(os.environ.get("APIFY_TOKEN")),
+         "detail": ("Connected. Prices are for your ZIP as shown on walmart.com, for items you confirmed under Me."
+                    if os.environ.get("APIFY_TOKEN") else "Not set up. Needs an APIFY_TOKEN on the server.")},
         {"key": "offers", "label": "Weekly ads and coupons", "connected": offers > 0,
          "detail": f"{offers} offer{'s' if offers != 1 else ''} loaded from an imported feed." if offers
          else "No offers loaded. They appear here once a feed is imported."},

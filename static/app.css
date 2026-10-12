@@ -327,3 +327,4 @@ h3.sec { font: 700 20px/1.2 var(--display); padding: 16px 20px 6px; margin: 0; }
 .sheet .pair .field { padding-bottom: 8px; }
 .hello { padding: 16px 20px 0; color: var(--muted); font-weight: 600; }
 .hello + .top { padding-top: 4px; }
+.q-online { color: var(--primary); border-color: var(--primary); }
