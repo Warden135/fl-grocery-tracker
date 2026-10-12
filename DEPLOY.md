@@ -58,8 +58,8 @@ sudo systemctl restart grocery-tracker
 
 ## Reaching it away from home
 
-- **Do not port-forward it to the internet.** HTTP Basic auth over plain HTTP sends the
-  password unencrypted.
+- **Do not port-forward it to the internet.** Over plain HTTP, passwords and login
+  cookies are sent unencrypted.
 - Easiest safe option: install [Tailscale](https://tailscale.com) on the server and your
   phone/laptop, then browse to the server's Tailscale address on port 8000.
 - Alternative: put a reverse proxy with HTTPS (Caddy or nginx) in front of it first.
