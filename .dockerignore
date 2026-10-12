@@ -6,3 +6,4 @@ grocery.db
 .env
 deploy
 *.md
+tests

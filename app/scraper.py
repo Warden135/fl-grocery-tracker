@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .db import get_conn
+from .db import get_conn, init_db
 
 USER_AGENT = "FLGroceryTracker/0.1 (personal price tracker)"
 REQUEST_DELAY_SECONDS = 3.0
@@ -110,6 +110,7 @@ def extract_price(html, selector=None):
 def scrape_all(delay=REQUEST_DELAY_SECONDS):
     """Scrape every listing that has a URL. Returns a summary dict."""
     summary = {"ok": 0, "skipped": 0, "failed": 0, "details": []}
+    init_db()
     with get_conn() as conn:
         listings = conn.execute(
             "SELECT id, url, selector FROM listings WHERE url IS NOT NULL AND url != ''"

@@ -20,7 +20,7 @@ sudo chown -R grocery:grocery /opt/fl-grocery-tracker
 ```bash
 sudo mkdir -p /var/lib/grocery-tracker && sudo chown grocery:grocery /var/lib/grocery-tracker
 sudo cp deploy/grocery-tracker.env.example /etc/grocery-tracker.env
-sudo nano /etc/grocery-tracker.env     # set a long random APP_PASSWORD
+sudo nano /etc/grocery-tracker.env     # optional: set APP_PASSWORD, COOKIE_SECURE
 sudo chmod 600 /etc/grocery-tracker.env
 ```
 
@@ -35,8 +35,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now grocery-tracker.service grocery-scrape.timer
 ```
 
-Open `http://<server-ip>:8000` from any device on your network. The browser will ask
-for a login: any username, and your `APP_PASSWORD`.
+Open `http://<server-ip>:8000` from any device on your network. Create an account to get
+started. (If you set `APP_PASSWORD`, the browser first asks for it: any username.)
 
 Useful commands:
 

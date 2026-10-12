@@ -6,7 +6,9 @@ services:
       - "8000:8000"
     environment:
       GROCERY_DB: /data/grocery.db
-      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in the .env file}
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
     volumes:
       - grocery-data:/data
 
