@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Florida Grocery Prices</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#fafaf7; --card:#fff; --ink:#1d2b24; --muted:#6b7a72; --line:#e3e8e4; --accent:#1f7a4d; --warn:#c2410c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121a16; --card:#1a2420; --ink:#e8efe9; --muted:#8fa196; --line:#2a3731; --accent:#4cc38a; --warn:#fb923c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:20px 16px 8px; max-width:900px; margin:auto; }
+  h1 { margin:0; font-size:22px; }
+  .sub { color:var(--muted); font-size:13px; }
+  nav { display:flex; gap:4px; max-width:900px; margin:8px auto 0; padding:0 16px; border-bottom:1px solid var(--line); overflow-x:auto; }
+  nav button { background:none; border:0; padding:10px 14px; font:inherit; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; }
+  nav button.active { color:var(--accent); border-color:var(--accent); font-weight:600; }
+  main { max-width:900px; margin:auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  select, input { font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--ink); }
+  button.btn { font:inherit; padding:8px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.link { background:none; border:0; color:var(--warn); cursor:pointer; font:inherit; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  th { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .best { color:var(--accent); font-weight:600; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  .badge { font-size:12px; padding:2px 8px; border-radius:99px; background:var(--line); color:var(--muted); }
+  .badge.hit { background:var(--accent); color:#fff; }
+  .empty { color:var(--muted); padding:12px 0; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Florida Grocery Prices</h1>
+  <div class="sub">Compare stores, watch price history, build a basket, set price alerts.</div>
+</header>
+<nav id="tabs">
+  <button data-tab="compare" class="active">Compare</button>
+  <button data-tab="history">History</button>
+  <button data-tab="list">Shopping list</button>
+  <button data-tab="alerts">Alerts</button>
+  <button data-tab="add">Add price</button>
+</nav>
+<main>
+  <section id="compare" class="card">
+    <div class="row"><select id="cmpProduct"></select></div>
+    <div id="cmpOut"></div>
+  </section>
+
+  <section id="history" class="card hidden">
+    <div class="row">
+      <select id="histProduct"></select>
+      <select id="histDays"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="365">1 year</option></select>
+    </div>
+    <canvas id="histChart" height="120"></canvas>
+    <div id="histEmpty" class="empty hidden">No history for this product yet.</div>
+  </section>
+
+  <section id="list" class="card hidden">
+    <div class="row">
+      <select id="listProduct"></select>
+      <input id="listQty" type="number" min="1" value="1" style="width:70px">
+      <button class="btn" id="listAdd">Add to list</button>
+    </div>
+    <div id="listItems"></div>
+    <h3>Cheapest store for this basket</h3>
+    <div id="listTotals"></div>
+  </section>
+
+  <section id="alerts" class="card hidden">
+    <div class="row">
+      <select id="alertProduct"></select>
+      <input id="alertPrice" type="number" step="0.01" min="0" placeholder="Target $" style="width:110px">
+      <button class="btn" id="alertAdd">Alert me at or below</button>
+    </div>
+    <div id="alertList"></div>
+  </section>
+
+  <section id="add" class="card hidden">
+    <p class="sub">Log a price you saw in a store. Stores and products come from the lists below.</p>
+    <div class="row">
+      <select id="addProduct"></select>
+      <select id="addStore"></select>
+      <input id="addPrice" type="number" step="0.01" min="0" placeholder="Price $" style="width:110px">
+      <button class="btn" id="addBtn">Save price</button>
+    </div>
+    <div id="addMsg" class="sub"></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+    <div class="row">
+      <input id="newProduct" placeholder="New product (e.g. Eggs, large, dozen)">
+      <button class="btn" id="newProductBtn">Add product</button>
+    </div>
+    <div class="row">
+      <input id="newChain" placeholder="Chain (e.g. Publix)">
+      <input id="newCity" placeholder="City (e.g. Tampa)">
+      <button class="btn" id="newStoreBtn">Add store</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (n) => "$" + Number(n).toFixed(2);
+const api = async (path, opts) => {
+  const r = await fetch(path, opts && opts.body ? { headers: { "Content-Type": "application/json" }, ...opts } : opts);
+  return r.json();
+};
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let products = [], stores = [], chart;
+
+async function loadRefs() {
+  [products, stores] = await Promise.all([api("/api/products"), api("/api/stores")]);
+  const opts = products.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+  ["cmpProduct", "histProduct", "listProduct", "alertProduct", "addProduct"].forEach((id) => {
+    const sel = $(id), keep = sel.value;
+    sel.innerHTML = opts;
+    if (keep) sel.value = keep;
+  });
+  $("addStore").innerHTML = stores.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join("");
+}
+
+// --- tabs
+$("tabs").addEventListener("click", (e) => {
+  const tab = e.target.dataset.tab;
+  if (!tab) return;
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b === e.target));
+  document.querySelectorAll("main section").forEach((s) => s.classList.toggle("hidden", s.id !== tab));
+  ({ compare: showCompare, history: showHistory, list: showList, alerts: showAlerts }[tab] || (() => {}))();
+});
+
+// --- compare
+async function showCompare() {
+  if (!$("cmpProduct").value) { $("cmpOut").innerHTML = '<div class="empty">No products yet. Add one under "Add price".</div>'; return; }
+  const d = await api("/api/compare/" + $("cmpProduct").value);
+  if (!d.prices || !d.prices.length) { $("cmpOut").innerHTML = '<div class="empty">No prices recorded for this product yet.</div>'; return; }
+  const min = d.prices[0].price;
+  $("cmpOut").innerHTML = `<table><tr><th>Store</th><th class="num">Price</th><th class="num">vs. cheapest</th><th>Updated</th></tr>` +
+    d.prices.map((p) => `<tr><td>${esc(p.store)}</td><td class="num ${p.price === min ? "best" : ""}">${money(p.price)}</td>
+      <td class="num">${p.price === min ? "cheapest" : "+" + money(p.price - min)}</td><td>${esc(p.scraped_at.slice(0, 10))}</td></tr>`).join("") + "</table>";
+}
+$("cmpProduct").onchange = showCompare;
+
+// --- history
+async function showHistory() {
+  if (!$("histProduct").value) return;
+  const d = await api(`/api/history/${$("histProduct").value}?days=${$("histDays").value}`);
+  if (chart) chart.destroy();
+  $("histEmpty").classList.toggle("hidden", d.labels.length > 0);
+  const palette = ["#1f7a4d", "#c2410c", "#2563eb", "#9333ea", "#ca8a04", "#0891b2", "#be185d"];
+  chart = new Chart($("histChart"), {
+    type: "line",
+    data: { labels: d.labels, datasets: d.series.map((s, i) => ({
+      label: s.store, data: s.data, borderColor: palette[i % palette.length], backgroundColor: palette[i % palette.length],
+      spanGaps: true, tension: 0.2, pointRadius: 2 })) },
+    options: { scales: { y: { ticks: { callback: (v) => "$" + v } } }, plugins: { tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${money(c.parsed.y)}` } } } },
+  });
+}
+$("histProduct").onchange = showHistory;
+$("histDays").onchange = showHistory;
+
+// --- shopping list
+async function showList() {
+  const [items, totals] = await Promise.all([api("/api/list"), api("/api/list/totals")]);
+  $("listItems").innerHTML = items.length
+    ? "<table>" + items.map((i) => `<tr><td>${esc(i.name)}</td><td class="num">× ${i.qty}</td><td class="num"><button class="link" data-del="${i.id}">Remove</button></td></tr>`).join("") + "</table>"
+    : '<div class="empty">Your list is empty.</div>';
+  $("listTotals").innerHTML = totals.stores.length
+    ? "<table><tr><th>Store</th><th class='num'>Total</th><th>Coverage</th></tr>" +
+      totals.stores.map((s, i) => `<tr><td>${esc(s.store)}</td><td class="num ${i === 0 ? "best" : ""}">${money(s.total)}</td>
+        <td>${s.complete ? '<span class="badge hit">all items</span>' : `<span class="badge">missing ${s.missing}</span>`}</td></tr>`).join("") + "</table>"
+    : '<div class="empty">Add items with recorded prices to see totals.</div>';
+}
+$("listAdd").onclick = async () => { await post("/api/list", { product_id: $("listProduct").value, qty: $("listQty").value }); showList(); };
+$("listItems").addEventListener("click", async (e) => {
+  if (e.target.dataset.del) { await api("/api/list/" + e.target.dataset.del, { method: "DELETE" }); showList(); }
+});
+
+// --- alerts
+async function showAlerts() {
+  const alerts = await api("/api/alerts");
+  $("alertList").innerHTML = alerts.length
+    ? "<table>" + alerts.map((a) => `<tr><td>${esc(a.name)}</td><td class="num">≤ ${money(a.target_price)}</td>
+        <td>${a.triggered ? `<span class="badge hit">${esc(a.best.store)} at ${money(a.best.price)}</span>` : '<span class="badge">watching</span>'}</td>
+        <td class="num"><button class="link" data-del="${a.id}">Remove</button></td></tr>`).join("") + "</table>"
+    : '<div class="empty">No alerts yet.</div>';
+}
+$("alertAdd").onclick = async () => {
+  if (!$("alertPrice").value) return;
+  await post("/api/alerts", { product_id: $("alertProduct").value, target_price: $("alertPrice").value });
+  $("alertPrice").value = ""; showAlerts();
+};
+$("alertList").addEventListener("click", async (e) => {
+  if (e.target.dataset.del) { await api("/api/alerts/" + e.target.dataset.del, { method: "DELETE" }); showAlerts(); }
+});
+
+// --- add data
+$("addBtn").onclick = async () => {
+  const res = await post("/api/prices", { product_id: $("addProduct").value, store_id: $("addStore").value, price: $("addPrice").value });
+  $("addMsg").textContent = res.ok ? "Saved." : (res.error || "Could not save.");
+  if (res.ok) $("addPrice").value = "";
+};
+$("newProductBtn").onclick = async () => { if ($("newProduct").value.trim()) { await post("/api/products", { name: $("newProduct").value }); $("newProduct").value = ""; await loadRefs(); } };
+$("newStoreBtn").onclick = async () => { if ($("newChain").value.trim() && $("newCity").value.trim()) { await post("/api/stores", { chain: $("newChain").value, city: $("newCity").value }); $("newChain").value = $("newCity").value = ""; await loadRefs(); } };
+
+loadRefs().then(showCompare);
+</script>
+</body>
+</html>
