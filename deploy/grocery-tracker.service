@@ -1,0 +1,14 @@
+[Unit]
+Description=Florida Grocery Price Tracker (web)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=grocery
+WorkingDirectory=/opt/fl-grocery-tracker
+EnvironmentFile=/etc/grocery-tracker.env
+ExecStart=/opt/fl-grocery-tracker/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:8000 app.main:app
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

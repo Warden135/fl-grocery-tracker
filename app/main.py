@@ -1,13 +1,27 @@
+import hmac
 import os
 from collections import defaultdict
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 from .db import LATEST_PRICES_SQL, get_conn, init_db
 from .scraper import scrape_all
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "static")
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
+
+
+@app.before_request
+def _require_password():
+    """If APP_PASSWORD is set, every route needs HTTP Basic auth (any username)."""
+    expected = os.environ.get("APP_PASSWORD")
+    if not expected:
+        return None
+    auth = request.authorization
+    if auth and auth.password is not None and hmac.compare_digest(
+            auth.password.encode(), expected.encode()):
+        return None
+    return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="Grocery Tracker"'})
 
 
 @app.before_request

@@ -1,0 +1,9 @@
+[Unit]
+Description=Florida Grocery Price Tracker (daily scrape)
+
+[Service]
+Type=oneshot
+User=grocery
+WorkingDirectory=/opt/fl-grocery-tracker
+EnvironmentFile=/etc/grocery-tracker.env
+ExecStart=/opt/fl-grocery-tracker/.venv/bin/python -m app.scraper
