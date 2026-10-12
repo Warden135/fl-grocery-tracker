@@ -1,0 +1,24 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      GROCERY_DB: /data/grocery.db
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in the .env file}
+    volumes:
+      - grocery-data:/data
+
+  # Runs the scraper once a day against the same database.
+  scraper:
+    build: .
+    restart: unless-stopped
+    environment:
+      GROCERY_DB: /data/grocery.db
+    volumes:
+      - grocery-data:/data
+    command: ["sh", "-c", "while true; do python -m app.scraper; sleep 86400; done"]
+
+volumes:
+  grocery-data:
